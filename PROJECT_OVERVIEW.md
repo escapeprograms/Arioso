@@ -1,0 +1,7 @@
+This project is Arioso - a machine learning project to synthesize a violin sound from a note input.
+
+The plan for the model is to have a flow matching model from an informed prior mel to a realistic violin-sounding target mel. The informed prior is a sawtooth wave generated from the midi and must be time-aligned to the violin GT audio. The aligning is done by the dataset itself, but needs a manual quality check. We then use BigVGAN-v2 to turn the output mel into an audio.
+
+Project structure: `DataSynthesizer/` builds the training set; a top-level `common/` package holds shared audio I/O and constants (e.g. the sample rate) that both DataSynthesizer and the training code import — reuse it rather than re-implementing audio handling. Training code is the next package to be added. Vendored third-party repos live under `external/` — the BigVGAN vocoder (`external/BigVGAN`) and the violin-transcription MIDI dataset repo (`external/violin-transcription`), the raw material DataSynthesizer builds from.
+
+Vocoder: the model outputs mel-spectrograms that are turned back into audio by **BigVGAN-v2** (`nvidia/bigvgan_v2_44khz_128band_512x`, 44.1 kHz / hop 512 / 128 mel bands). It is vendored under `external/BigVGAN` and wrapped by `common/vocoder.py`; the mel contract it requires (hop, n_fft, win, mel bands, fmin/fmax) is the single source of truth in `common/config.py`. Always compute mels via `common.vocoder.mel_spectrogram` so they match what the vocoder expects.

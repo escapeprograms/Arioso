@@ -1,0 +1,93 @@
+# ─────────────────────────────────────────────────────────────
+# Agent instructions / AI assistant config
+# ─────────────────────────────────────────────────────────────
+AGENTS.md
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.cursor/
+.cursorrules
+.aider*
+.github/copilot-instructions.md
+
+# ─────────────────────────────────────────────────────────────
+# Vendored / imported third-party repositories
+# (BigVGAN-v2 vocoder, violin-transcription, etc.) — large, re-cloneable.
+# ─────────────────────────────────────────────────────────────
+external/
+
+# ─────────────────────────────────────────────────────────────
+# Datasets & generated audio (large, re-generatable)
+# ─────────────────────────────────────────────────────────────
+Data/
+test_recordings/
+test_synthesized/
+DataSynthesizer/scratch_out/
+*_cache/
+_cache/
+
+# Audio files
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.aac
+*.aiff
+
+# Model checkpoints / weights & precomputed tensors
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.npy
+*.npz
+*.h5
+*.bin
+
+# BigVGAN-v2 self-test output
+bigvgan_selftest_out.wav
+
+# ─────────────────────────────────────────────────────────────
+# Python
+# ─────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ─────────────────────────────────────────────────────────────
+# Environments & secrets
+# ─────────────────────────────────────────────────────────────
+.env
+.env.*
+*.key
+secrets.*
+
+# ─────────────────────────────────────────────────────────────
+# Editor / OS cruft
+# ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
