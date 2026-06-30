@@ -1,0 +1,122 @@
+_wandb:
+    value:
+        cli_version: 0.28.0
+        e:
+            9k5ouko4g5r9wqaaba06trr4nryvpfsy:
+                cpu_count: 16
+                cpu_count_logical: 22
+                cudaVersion: "13.2"
+                disk:
+                    /:
+                        total: "1021821579264"
+                        used: "985278312448"
+                email: arkyli17@gmail.com
+                executable: C:\Users\archi\miniconda3\envs\ai-violin\python.exe
+                git:
+                    commit: 936bad95b9cf70e62deceacb14f22c1546d7b4e4
+                    remote: https://github.com/escapeprograms/Arioso.git
+                gpu: NVIDIA RTX 2000 Ada Generation Laptop GPU
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Ada
+                      cudaCores: 3072
+                      memoryTotal: "8585740288"
+                      name: NVIDIA RTX 2000 Ada Generation Laptop GPU
+                      uuid: GPU-fe4e31c1-1ea4-da87-fbab-419dbf79ad4c
+                host: ArkyII
+                memory:
+                    total: "33832407040"
+                os: Windows-10-10.0.26200-SP0
+                program: -m Arioso.train
+                python: CPython 3.11.15
+                root: C:\Users\archi\Documents\Coding stuff\AI Violin
+                startedAt: "2026-06-30T21:20:10.840254Z"
+                writerId: 9k5ouko4g5r9wqaaba06trr4nryvpfsy
+        m: []
+        python_version: 3.11.15
+        t:
+            "1":
+                - 1
+            "2":
+                - 1
+            "3":
+                - 16
+                - 61
+            "4": 3.11.15
+            "5": 0.28.0
+            "8":
+                - 3
+            "12": 0.28.0
+            "13": windows-amd64
+batch_size:
+    value: 8
+chunk_frames:
+    value: 860
+device:
+    value: cuda
+dit_blocks:
+    value: 3
+dit_ffn:
+    value: 1536
+dit_head_dim:
+    value: 64
+dit_heads:
+    value: 6
+ema_max:
+    value: 0.9999
+euler_steps:
+    value: 24
+grad_clip:
+    value: 1
+hidden:
+    value: 384
+hop:
+    value: 512
+in_ch:
+    value: 256
+l_min_s:
+    value: 5
+lr:
+    value: 0.0002
+n_mels:
+    value: 128
+overlap_frames:
+    value: 16
+rope_base:
+    value: 10000
+seed:
+    value: 0
+sigma:
+    value: 0.0001
+sr:
+    value: 44100
+t_emb_dim:
+    value: 256
+target_s:
+    value: 10
+total_steps:
+    value: 200000
+val_frac:
+    value: 0.1
+warmup_steps:
+    value: 4000
+weight_decay:
+    value: 0.01
+wn_blocks:
+    value: 20
+wn_dilation_cycle:
+    value:
+        - 1
+        - 2
+        - 4
+        - 8
+        - 16
+        - 32
+        - 64
+        - 128
+        - 256
+        - 512
+wn_dilation_repeats:
+    value: 2
+wn_kernel:
+    value: 3

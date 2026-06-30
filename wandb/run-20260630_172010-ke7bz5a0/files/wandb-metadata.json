@@ -1,0 +1,38 @@
+{
+  "os": "Windows-10-10.0.26200-SP0",
+  "python": "CPython 3.11.15",
+  "startedAt": "2026-06-30T21:20:10.840254Z",
+  "program": "-m Arioso.train",
+  "git": {
+    "remote": "https://github.com/escapeprograms/Arioso.git",
+    "commit": "936bad95b9cf70e62deceacb14f22c1546d7b4e4"
+  },
+  "email": "arkyli17@gmail.com",
+  "root": "C:\\Users\\archi\\Documents\\Coding stuff\\AI Violin",
+  "host": "ArkyII",
+  "executable": "C:\\Users\\archi\\miniconda3\\envs\\ai-violin\\python.exe",
+  "cpu_count": 16,
+  "cpu_count_logical": 22,
+  "gpu": "NVIDIA RTX 2000 Ada Generation Laptop GPU",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "1021821579264",
+      "used": "985278312448"
+    }
+  },
+  "memory": {
+    "total": "33832407040"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA RTX 2000 Ada Generation Laptop GPU",
+      "memoryTotal": "8585740288",
+      "cudaCores": 3072,
+      "architecture": "Ada",
+      "uuid": "GPU-fe4e31c1-1ea4-da87-fbab-419dbf79ad4c"
+    }
+  ],
+  "cudaVersion": "13.2",
+  "writerId": "9k5ouko4g5r9wqaaba06trr4nryvpfsy"
+}

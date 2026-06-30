@@ -1,9 +1,12 @@
-"""Arioso hyperparameters — the single, toggleable config for prior + model + training.
+"""Arioso hyperparameters — the single, toggleable config for the model + training.
 
 One frozen dataclass (``AriosoConfig``) so a run is fully described by one object and
 ablations are a one-field change. The **mel contract** is *not* redefined here — it is
 imported from ``common.config`` (the project's single source of truth, asserted against
-the BigVGAN checkpoint at vocoder-load time). Only Arioso-specific knobs live here.
+the BigVGAN checkpoint at vocoder-load time). The **prior** is a dataset artifact built
+by ``DataSynthesizer.build_prior``; its knobs (anti-alias, envelope, level match, RMS
+target) live in ``DataSynthesizer.config`` (the single source of truth shared with the
+GT loudness normalization). Only Arioso-specific model/training knobs live here.
 
 Defaults are the **spec baseline** (``SPEC_Arioso_v1_baseline.md``); every deferred or
 out-of-scope feature is a toggle that defaults OFF so the baseline is the default run.
@@ -14,6 +17,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from common.config import HOP_SIZE, N_MELS, SR
+# Prior-build output layout is owned by DataSynthesizer (it writes these dirs); re-export
+# so Arioso readers (clips, dataset, eval) keep a single ``from .config import ...`` line.
+from DataSynthesizer.config import ONSETS_DIR, PRIOR_MEL_DIR
 
 # Frames per second of the mel grid (~86.13 at SR=44100, hop=512).
 FRAME_RATE = SR / HOP_SIZE
@@ -28,24 +34,8 @@ class AriosoConfig:
     hop: int = HOP_SIZE
     n_mels: int = N_MELS
 
-    # --- Prior generation (Section 4) --------------------------------------------
-    # pitch_source: "quantized" = constant MIDI-pitch saw (baseline); "bend" = pitch-
-    #   wheel-following (deferred ablation, rendered by DataSynthesizer.render_prior_bend).
-    pitch_source: str = "quantized"
-    # anti_alias: True = polyBLEP band-limited saw; False = naive scipy sawtooth.
-    anti_alias: bool = True
-    # envelope: "rect" = hard on/off note gating (baseline, per build decision);
-    #   "fade" = 5 ms linear anti-click ramp (DataSynthesizer._fade_envelope).
-    #   ADSR is intentionally NOT implemented this round.
-    envelope: str = "rect"
-    fade_ms: float = 5.0
-    # level_match: "masked_rms" = scale prior so its sounding-frame RMS hits target_rms_dbfs
-    #   (single per-recording scalar, Section 4.3); "peak" = peak-normalize.
-    level_match: str = "masked_rms"
-    # The level all GTs were voiced-RMS-normalized to by DataSynthesizer (TARGET_RMS_DBFS).
-    # Matching the prior to this *constant* (not a per-recording target) keeps prior generation
-    # fully score-determined => identical at train and inference (Section 9.1 / checklist).
-    target_rms_dbfs: float = -20.0
+    # The prior (Section 4) is a dataset artifact built by DataSynthesizer.build_prior;
+    # its knobs live in DataSynthesizer.config, not here.
 
     # --- Model architecture (Section 6) ------------------------------------------
     hidden: int = 384
@@ -105,13 +95,19 @@ class AriosoConfig:
         assert len(self.dilations) == self.wn_blocks, \
             "dilation cycle * repeats must equal wn_blocks"
         assert self.in_ch == 2 * self.n_mels, "in_ch must be 2 * n_mels ([x_t, x_0])"
-        assert self.pitch_source in ("quantized", "bend")
-        assert self.envelope in ("rect", "fade")
-        assert self.level_match in ("masked_rms", "peak")
 
 
-# --- Output layout (new dirs under the DataSynthesizer `data/` root) -------------
-PRIOR_MEL_DIR = "prior_mel_arioso"   # [N_MELS, T] float32, masked-RMS-matched prior mel
-ONSETS_DIR = "onsets_arioso"         # [K] int32 aligned onset frame indices per recording
-SPLIT_FILE = "arioso_split.json"     # held-out-piece split (train/val basenames)
-CKPT_DIR = "checkpoints_arioso"      # raw + EMA checkpoints
+# --- Output layout ---------------------------------------------------------------
+# Training *data* (prior mels, onset frames, split) lives under the DataSynthesizer `data/`
+# root; model *artifacts* (checkpoints, listening samples) live under the Arioso package.
+# PRIOR_MEL_DIR / ONSETS_DIR are re-exported from DataSynthesizer.config (above), which
+# owns the prior build and writes those dirs.
+SPLIT_FILE = "arioso_split.json"     # held-out-piece split (train/val basenames) (in data/)
+CKPT_DIR = "Arioso/models"           # raw + EMA checkpoints (project-relative, gitignored)
+SAMPLES_DIR = "Arioso/samples"       # listening artifacts (copy-synthesis, inference wavs)
+
+# --- Experiment tracking ---------------------------------------------------------
+# Weights & Biases destination for training runs. The API key is read from the env
+# (WANDB_API_KEY) or a gitignored .env file (see .env.example), never hardcoded.
+WANDB_ENTITY = "archimedesli"
+WANDB_PROJECT = "Arioso"

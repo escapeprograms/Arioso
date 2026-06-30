@@ -9,7 +9,7 @@ Built on the shared infrastructure — ``common`` (audio I/O, mel contract, voco
 ``DataSynthesizer`` dataset (``data/manifest.csv`` + per-clip target/prior mels). Run the
 modules as a package so intra-package imports resolve, e.g.::
 
-    python -m Arioso.build_prior --limit 4
+    python -m DataSynthesizer.build_prior --limit 4   # prior features (owned by DataSynthesizer)
     python -m Arioso.train --smoke
     python -m Arioso.infer <score.mid> -o out.wav
 

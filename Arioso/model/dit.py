@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ..config import AriosoConfig
 
@@ -54,15 +55,14 @@ class RoPESelfAttention(nn.Module):
         cos, sin = _rope_tables(t, self.head_dim, self.base, x.device, x.dtype)
         q, k = _apply_rope(q, cos, sin), _apply_rope(k, cos, sin)
 
-        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale    # [B, heads, T, T]
+        attn_mask = None
         if frame_mask is not None:
-            # frame_mask: [B, T] (1 real / 0 pad). Forbid attending to pad keys.
-            pad = (frame_mask == 0)[:, None, None, :]                 # [B, 1, 1, T]
-            scores = scores.masked_fill(pad, float("-inf"))
-        attn = torch.softmax(scores, dim=-1)
-        # Rows that are entirely pad (a fully-padded query) softmax to NaN; zero them.
-        attn = torch.nan_to_num(attn)
-        h = torch.matmul(attn, v)                                    # [B, heads, T, head_dim]
+            # SDPA boolean mask: True = PARTICIPATE (inverse of the old pad mask). frame_mask is
+            # [B, T] (1 real / 0 pad); broadcast over heads + query dim to forbid pad keys.
+            attn_mask = (frame_mask != 0)[:, None, None, :]          # [B, 1, 1, T] bool
+        # SDPA's default scale is head_dim**-0.5 (== self.scale); its mem-efficient kernel avoids
+        # materializing the [B, heads, T, T] scores, the main fragmentation source under varying T.
+        h = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)  # [B, heads, T, head_dim]
         h = h.transpose(1, 2).reshape(b, t, self.heads * self.head_dim)
         return self.out(h)
 

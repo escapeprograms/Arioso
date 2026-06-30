@@ -80,7 +80,11 @@ Re-exports `SR`/`HOP` from `common.config` (so modules keep one `from .config im
 line) and owns the build-specific constants: `FADE_MS=5.0`, `BOOKS`, `DEFAULT_DATASET`,
 `DEFAULT_OUT`, the target-normalization knobs `TARGET_RMS_DBFS=-20.0` / `VOICED_TOP_DB=40.0`,
 and the onset-mask knobs `ONSET_DECAY_MS=50.0` / `ONSET_DECAY_FLOOR=0.01`. The peak target
-lives in `common` (`DEFAULT_PEAK`, also the post-normalization clip guard).
+lives in `common` (`DEFAULT_PEAK`, also the post-normalization clip guard). It also owns the
+**Arioso prior** knobs — `PRIOR_ANTI_ALIAS=True` / `PRIOR_ENVELOPE="rect"` /
+`PRIOR_LEVEL_MATCH="masked_rms"` (assembled by `synthesizePrior.quantized_prior`) and the prior
+build's output dirs `PRIOR_MEL_DIR` / `ONSETS_DIR` — so `TARGET_RMS_DBFS` is the **single source
+of truth** shared between GT loudness normalization and the prior's masked-RMS level match.
 
 ### clip_name.py — the one filename parser
 - `parse_clip_name(path)` → `ClipName(youtube_id, start, end, basename, composer, catalog,
@@ -90,23 +94,37 @@ lives in `common` (`DEFAULT_PEAK`, also the post-normalization clip guard).
 
 ## Files
 
-### synthesizePrior.py — MIDI → naive-sawtooth prior (quantized + pitch-bend) + onsets
-- `render_prior(midi_path, sr=44100, total_samples=None)` — **quantized**: for every note on
-  every instrument, compute one constant frequency from the MIDI pitch
-  (`pretty_midi.note_number_to_hz`, bends ignored), render a naive sawtooth over the note's
-  sample span, apply a ~5 ms fade, and sum into the buffer (summing reproduces
-  double-stops/polyphony). Returns a normalized float32 mono array (via `common.audio_io.normalize`).
+### synthesizePrior.py — MIDI → sawtooth prior via a composable `PriorSynth`
+A **Strategy**-pattern pipeline: one concrete `PriorSynth` orchestrator keeps the per-note
+summation loop (summing across instrument tracks reproduces double-stops/polyphony) and delegates
+each step to an injected, `Protocol`-typed component — swap any axis without a subclass explosion:
+- `PitchTrajectory` → per-note f0 curve: `Quantized` (constant MIDI pitch, baseline) | `PitchBend`
+  (pitch-wheel-following: vibrato/slides, ±2 semitones).
+- `SourceSynth` → unit saw from an f0 curve: `NaiveSaw` (`scipy.signal.sawtooth`) | `BandlimitedSaw`
+  (polyBLEP, removes fold-back aliasing). Both phase-accumulate via an **exclusive prefix-sum phase**
+  so a constant f0 reduces exactly to the old `arange(n)·dt` math (outputs stay numerically identical).
+- `Envelope` → `HardGate` ("rect", hard on/off) | `Fade` (~5 ms anti-click ramp via `_fade_envelope`).
+- `BodyFilter` → `Identity` (the no-EQ baseline; the seam for a future static body-EQ).
+- `Leveler` (`fit`/`apply`) → `MaskedRMS(target_rms_dbfs)` (scale so sounding-frame RMS hits the
+  target) | `Peak` (legacy peak-normalize to `DEFAULT_PEAK`). The level match is a component, not
+  baked into render. The mel front-end is **not** in the pipeline — callers mel after any alignment shift.
+- `quantized_prior(anti_alias=, envelope=, level_match=, target_rms_dbfs=, sr=)` — factory that
+  assembles the spec-baseline quantized pipeline from the `PRIOR_*` config knobs.
+- `render_prior(midi_path, sr=44100, total_samples=None)` / `render_prior_bend(...)` — thin wrappers
+  for the legacy **peak-normalized** quantized / pitch-bend priors (used by `build_dataset`).
   `total_samples` defaults to the MIDI end time; pass the GT length to force exact pair alignment.
-- `render_prior_bend(midi_path, sr=44100, total_samples=None)` — **pitch-bend sibling**: same
-  shape, but the instantaneous frequency follows `note.pitch + bend(t)` (interpolated pitch-wheel,
-  ±2 semitones via `_bend_semitones_at`), built by phase accumulation so the time-varying
-  frequency stays phase-continuous. Carries vibrato/slides into the prior.
 - `note_onsets(midi_path)` — sorted, de-duplicated note onset times (seconds) across instruments;
   the exact onsets the prior carries, used to build the onset mask.
 - `synthesize_to_file(midi_path, out_path, ...)` — `render_prior` + `common.audio_io.write_pcm16`.
-- `_fade_envelope(n, ...)` — linear fade-in/out (shrinks on short notes) that removes the
-  clicks a hard-gated sawtooth would make at note boundaries.
 - CLI: `python -m DataSynthesizer.synthesizePrior clip.mid -o clip_prior.wav` (quantized).
+
+### build_prior.py — Arioso prior features over the dataset (one-time pass)
+- `build(...)` / `process_clip(row, ...)` — pass over `manifest.csv` (status==ok): assemble the
+  spec-faithful prior via `quantized_prior` (anti-aliased saw + masked-RMS to `TARGET_RMS_DBFS`),
+  shift by the manifest `offset_ms`, mel it → `data/prior_mel_arioso/<base>.npy`, and write aligned
+  onset frames → `data/onsets_arioso/<base>.npy`. Reuses the manifest offset (no re-estimation);
+  resumable + skip-existing. CLI flags `--no-anti-alias` / `--envelope` / `--level-match` for ablations.
+- CLI: `python -m DataSynthesizer.build_prior --limit 4` (smoke) | `python -m DataSynthesizer.build_prior` (full).
 
 ### download_audio.py — obtain, level-normalize + trim the GT violin audio (step 1)
 - `download_full_audio(youtube_id, cache_dir, sr=44100, audio_codec="wav")` — download a whole

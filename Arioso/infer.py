@@ -1,7 +1,8 @@
 """Arioso inference: score -> prior -> Euler-integrated mel -> audio (Section 9).
 
-The prior is built from the input score **exactly as in training** (``Arioso.prior``: quantized
-saw + masked-RMS to the fixed target level + mel). Starting from ``x = x_0`` at t=0, integrate the
+The prior is built from the input score **exactly as in training** (``DataSynthesizer.synthesizePrior``
+via ``quantized_prior``: band-limited saw + masked-RMS to the fixed target level + mel). Starting
+from ``x = x_0`` at t=0, integrate the
 ODE ``x <- x + dt * v_theta(x, x_0, t)`` with 16-32 Euler steps (no CFG, single forward/step).
 Long sequences are processed in overlapping chunks with a linear crossfade. The mel is turned to
 audio with the **frozen** BigVGAN-v2 vocoder (listening only — never a selection arbiter).
@@ -16,19 +17,24 @@ import numpy as np
 import torch
 
 from common.vocoder import load_vocoder, vocode
+from DataSynthesizer.config import (PRIOR_ANTI_ALIAS, PRIOR_ENVELOPE, PRIOR_LEVEL_MATCH,
+                                    TARGET_RMS_DBFS)
 from DataSynthesizer.features import mel_for_training
+from DataSynthesizer.synthesizePrior import quantized_prior
 
-from .config import AriosoConfig
+from .config import SAMPLES_DIR, AriosoConfig
 from .model import AriosoModel
-from .prior import _sounding_mask, level_match, render_prior
 
 
-def build_prior_mel(midi_path: str, cfg: AriosoConfig) -> np.ndarray:
-    """Score -> prior mel ``[N_MELS, T]``, identical to the training-time prior (Section 9.1)."""
-    prior = render_prior(midi_path, cfg)                      # length = MIDI end time
-    sounding = _sounding_mask(midi_path, len(prior))
-    prior, _ = level_match(prior, sounding, cfg)
-    return mel_for_training(prior)
+def build_prior_mel(midi_path: str) -> np.ndarray:
+    """Score -> prior mel ``[N_MELS, T]``, identical to the training-time prior (Section 9.1).
+
+    Built by the same DataSynthesizer pipeline the dataset's ``prior_mel_arioso`` was, so the
+    inference prior matches training. No GT-alignment shift here: the score's onsets *are* t=0.
+    """
+    synth = quantized_prior(anti_alias=PRIOR_ANTI_ALIAS, envelope=PRIOR_ENVELOPE,
+                            level_match=PRIOR_LEVEL_MATCH, target_rms_dbfs=TARGET_RMS_DBFS)
+    return mel_for_training(synth.render(midi_path))
 
 
 @torch.no_grad()
@@ -73,7 +79,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("midi", help="input score (.mid)")
-    ap.add_argument("-o", "--out", default="arioso_out.wav")
+    ap.add_argument("-o", "--out", default=os.path.join(SAMPLES_DIR, "arioso_out.wav"))
     ap.add_argument("--ckpt", required=True, help="checkpoint .pt (uses EMA weights)")
     ap.add_argument("--weights", choices=("ema", "model"), default="ema")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -86,7 +92,7 @@ def main() -> None:
     model.load_state_dict(ckpt[args.weights])
     model.eval()
 
-    prior_mel = build_prior_mel(args.midi, cfg)
+    prior_mel = build_prior_mel(args.midi)
     print(f"prior mel: {prior_mel.shape}  ({prior_mel.shape[-1] / cfg.sr * cfg.hop:.1f} s)")
     mel = generate_mel(model, prior_mel, cfg, args.device)
     if args.save_mel:
@@ -95,6 +101,7 @@ def main() -> None:
     voc = load_vocoder(device=args.device)                      # frozen; also asserts mel contract
     audio = vocode(voc, torch.from_numpy(mel[None]).float())
     from common.audio_io import write_pcm16
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     write_pcm16(args.out, audio)
     print(f"wrote {args.out}  ({len(audio) / cfg.sr:.1f} s)")
 

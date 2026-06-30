@@ -19,7 +19,7 @@ from common.audio_io import load_mono, write_pcm16
 from common.vocoder import load_vocoder, mel_spectrogram, vocode
 from DataSynthesizer.config import DEFAULT_OUT
 
-from ..config import AriosoConfig
+from ..config import SAMPLES_DIR, AriosoConfig
 from ..splits import make_split
 
 
@@ -39,7 +39,7 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out-dir", default=DEFAULT_OUT)
     ap.add_argument("--input", help="GT wav (default: first held-out clip)")
-    ap.add_argument("--out", default="arioso_copysynth.wav")
+    ap.add_argument("--out", default=os.path.join(SAMPLES_DIR, "copysynth.wav"))
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
 
@@ -51,6 +51,7 @@ def main() -> None:
     mel = mel_spectrogram(y)                                  # [1, 128, T], Section-3 front-end
     voc = load_vocoder(device=args.device)                   # asserts mel contract vs checkpoint
     audio = vocode(voc, mel.to(args.device))
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     write_pcm16(args.out, audio)
 
     n = min(len(y), len(audio))

@@ -89,7 +89,7 @@ def main() -> None:
               f"frames min/median/max: {lens.min()}/{int(np.median(lens))}/{lens.max()}  "
               f"(~{lens.min()/cfg.sr*cfg.hop:.1f}-{lens.max()/cfg.sr*cfg.hop:.1f} s)")
     else:
-        print(f"{args.split}: 0 clips (did you run build_prior?)")
+        print(f"{args.split}: 0 clips (did you run `python -m DataSynthesizer.build_prior`?)")
 
 
 if __name__ == "__main__":

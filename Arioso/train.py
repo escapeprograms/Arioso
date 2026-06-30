@@ -18,9 +18,41 @@ import torch
 from DataSynthesizer.config import DEFAULT_OUT
 
 from .cfm import interpolate, masked_mse
-from .config import CKPT_DIR, AriosoConfig
+from .config import CKPT_DIR, WANDB_ENTITY, WANDB_PROJECT, AriosoConfig
 from .dataset import build_dataloader
 from .model import AriosoModel
+
+
+def _load_dotenv(path: str = ".env") -> None:
+    """Minimal ``KEY=VALUE`` loader so the W&B API key can live in a gitignored ``.env``
+    (see ``.env.example``). Existing env vars win; no dependency on python-dotenv."""
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            os.environ.setdefault(key.strip(), val.strip().strip("'\""))
+
+
+def _init_wandb(cfg: AriosoConfig, run_cfg: dict):
+    """Return an initialized W&B run, or ``None`` if disabled/unavailable (training proceeds
+    regardless). Reads ``WANDB_API_KEY`` from the environment / ``.env``."""
+    _load_dotenv()
+    try:
+        import wandb
+    except ImportError:
+        print("  [wandb] package not installed — skipping (pip install wandb)")
+        return None
+    if not os.environ.get("WANDB_API_KEY"):
+        print("  [wandb] WANDB_API_KEY not set (.env or env var) — skipping")
+        return None
+    run = wandb.init(entity=WANDB_ENTITY, project=WANDB_PROJECT,
+                     config={**vars(cfg), **run_cfg})
+    print(f"  [wandb] logging to {run.url}")
+    return run
 
 
 def lr_at(step: int, cfg: AriosoConfig) -> float:
@@ -70,11 +102,15 @@ def evaluate(model, loader, cfg, device, max_batches: int = 20) -> float:
 
 
 def train(out_dir: str, cfg: AriosoConfig, batch_size: int, steps: int | None,
-          log_every: int, ckpt_every: int, val_every: int, device: str) -> None:
+          log_every: int, ckpt_every: int, val_every: int, device: str,
+          use_wandb: bool = True) -> None:
     torch.manual_seed(cfg.seed)
     total_steps = steps if steps is not None else cfg.total_steps
-    ckpt_dir = os.path.join(out_dir, CKPT_DIR)
+    ckpt_dir = CKPT_DIR                       # Arioso/models/ — model artifacts, not training data
     os.makedirs(ckpt_dir, exist_ok=True)
+
+    run = _init_wandb(cfg, {"batch_size": batch_size, "total_steps": total_steps,
+                            "device": device}) if use_wandb else None
 
     train_loader = build_dataloader(out_dir, "train", batch_size, cfg, shuffle=True)
     val_loader = build_dataloader(out_dir, "val", batch_size, cfg, shuffle=False)
@@ -113,26 +149,37 @@ def train(out_dir: str, cfg: AriosoConfig, batch_size: int, steps: int | None,
             ema.update(model, step)
 
             if step % log_every == 0:
-                print(f"step {step:7d}  loss {loss.item():.5f}  lr {lr_at(step, cfg):.2e}")
+                cur_lr = lr_at(step, cfg)
+                print(f"step {step:7d}  loss {loss.item():.5f}  lr {cur_lr:.2e}")
+                if run:
+                    run.log({"train/loss": loss.item(), "train/lr": cur_lr}, step=step)
             if val_every and step > 0 and step % val_every == 0:
-                print(f"  [val] velocity MSE: {evaluate(model, val_loader, cfg, device):.5f}")
+                val_mse = evaluate(model, val_loader, cfg, device)
+                print(f"  [val] velocity MSE: {val_mse:.5f}")
+                if run:
+                    run.log({"val/velocity_mse": val_mse}, step=step)
             if ckpt_every and step > 0 and step % ckpt_every == 0:
                 _save(ckpt_dir, model, ema, cfg, step)
             step += 1
 
     _save(ckpt_dir, model, ema, cfg, step, final=True)
-    print(f"  [val] final velocity MSE: {evaluate(model, val_loader, cfg, device):.5f}")
+    final_mse = evaluate(model, val_loader, cfg, device)
+    print(f"  [val] final velocity MSE: {final_mse:.5f}")
+    if run:
+        run.log({"val/velocity_mse": final_mse}, step=step)
+        run.finish()
 
 
 def _save(ckpt_dir, model, ema, cfg, step, final=False) -> None:
     name = "final" if final else f"step{step}"
-    path = os.path.join(ckpt_dir, f"arioso_{name}.pt")
+    path = os.path.join(ckpt_dir, f"checkpoint_{name}.pt")
     torch.save({"step": step, "model": model.state_dict(),
                 "ema": ema.shadow.state_dict(), "cfg": vars(cfg)}, path)
     print(f"  saved {path}")
 
 
 def main() -> None:
+    _load_dotenv()   # load PYTORCH_CUDA_ALLOC_CONF / WANDB_API_KEY before any CUDA init
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out-dir", default=DEFAULT_OUT)
@@ -144,17 +191,21 @@ def main() -> None:
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--smoke", action="store_true",
                     help="short run on a tiny subset to validate the pipeline")
+    ap.add_argument("--wandb", action=argparse.BooleanOptionalAction, default=True,
+                    help=f"log to W&B ({WANDB_ENTITY}/{WANDB_PROJECT}); needs WANDB_API_KEY "
+                         "in env or .env (default: on)")
     args = ap.parse_args()
 
     cfg = AriosoConfig()
     if args.smoke:
         steps = args.steps if args.steps is not None else 300
         train(args.out_dir, cfg, batch_size=min(args.batch_size, 4), steps=steps,
-              log_every=25, ckpt_every=0, val_every=150, device=args.device)
+              log_every=25, ckpt_every=0, val_every=150, device=args.device,
+              use_wandb=args.wandb)
     else:
         train(args.out_dir, cfg, batch_size=args.batch_size, steps=args.steps,
               log_every=args.log_every, ckpt_every=args.ckpt_every,
-              val_every=args.val_every, device=args.device)
+              val_every=args.val_every, device=args.device, use_wandb=args.wandb)
 
 
 if __name__ == "__main__":

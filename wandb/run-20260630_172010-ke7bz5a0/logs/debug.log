@@ -1,0 +1,44 @@
+2026-06-30 17:20:10,847 INFO    MainThread:182444 [wandb_setup.py:_flush():81] Current SDK version is 0.28.0
+2026-06-30 17:20:10,847 INFO    MainThread:182444 [wandb_setup.py:_flush():81] Configure stats pid to 182444
+2026-06-30 17:20:10,848 INFO    MainThread:182444 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2026-06-30 17:20:10,848 INFO    MainThread:182444 [wandb_init.py:setup_run_log_directory():725] Logging user logs to C:\Users\archi\Documents\Coding stuff\AI Violin\wandb\run-20260630_172010-ke7bz5a0\logs\debug.log
+2026-06-30 17:20:10,849 INFO    MainThread:182444 [wandb_init.py:setup_run_log_directory():726] Logging internal logs to C:\Users\archi\Documents\Coding stuff\AI Violin\wandb\run-20260630_172010-ke7bz5a0\logs\debug-internal.log
+2026-06-30 17:20:10,850 INFO    MainThread:182444 [wandb_init.py:init():768] calling init triggers
+2026-06-30 17:20:10,850 INFO    MainThread:182444 [wandb_init.py:init():773] wandb.init called with sweep_config: {}
+config: {'sr': 44100, 'hop': 512, 'n_mels': 128, 'hidden': 384, 'in_ch': 256, 't_emb_dim': 256, 'wn_blocks': 20, 'wn_kernel': 3, 'wn_dilation_cycle': (1, 2, 4, 8, 16, 32, 64, 128, 256, 512), 'wn_dilation_repeats': 2, 'dit_blocks': 3, 'dit_heads': 6, 'dit_head_dim': 64, 'dit_ffn': 1536, 'rope_base': 10000.0, 'sigma': 0.0001, 'lr': 0.0002, 'weight_decay': 0.01, 'warmup_steps': 4000, 'total_steps': 200000, 'grad_clip': 1.0, 'ema_max': 0.9999, 'seed': 0, 'val_frac': 0.1, 'l_min_s': 5.0, 'target_s': 10.0, 'euler_steps': 24, 'chunk_frames': 860, 'overlap_frames': 16, 'batch_size': 8, 'device': 'cuda', '_wandb': {}}
+2026-06-30 17:20:10,850 INFO    MainThread:182444 [wandb_init.py:init():816] starting backend
+2026-06-30 17:20:10,850 INFO    MainThread:182444 [wandb_init.py:init():831] sending inform_init request
+2026-06-30 17:20:11,397 INFO    MainThread:182444 [wandb_init.py:init():836] backend started and connected
+2026-06-30 17:20:11,423 INFO    MainThread:182444 [wandb_init.py:init():906] updated telemetry
+2026-06-30 17:20:11,482 INFO    MainThread:182444 [wandb_init.py:init():929] communicating run to backend with 90.0 second timeout
+2026-06-30 17:20:11,818 INFO    MainThread:182444 [wandb_init.py:init():974] starting run threads in backend
+2026-06-30 17:20:11,961 INFO    MainThread:182444 [wandb_run.py:_console_start():2523] atexit reg
+2026-06-30 17:20:11,961 INFO    MainThread:182444 [wandb_run.py:_redirect():2373] redirect: wrap_raw
+2026-06-30 17:20:11,962 INFO    MainThread:182444 [wandb_run.py:_redirect():2442] Wrapping output streams.
+2026-06-30 17:20:11,962 INFO    MainThread:182444 [wandb_run.py:_redirect():2465] Redirects installed.
+2026-06-30 17:20:11,974 INFO    MainThread:182444 [wandb_init.py:init():1012] run started, returning control to user process
+2026-06-30 17:44:50,752 INFO    wandb-AsyncioManager-main:182444 [service_client.py:_forward_responses():122] [no run ID] Reached EOF.
+2026-06-30 17:44:50,760 INFO    wandb-AsyncioManager-main:182444 [mailbox.py:close():154] [no run ID] Closing mailbox, abandoning 2 handles.
+2026-06-30 17:44:50,767 ERROR   wandb-AsyncioManager-main:182444 [asyncio_manager.py:fn_wrap_exceptions():184] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "C:\Users\archi\miniconda3\envs\ai-violin\Lib\site-packages\wandb\sdk\lib\asyncio_manager.py", line 182, in fn_wrap_exceptions
+    await fn()
+  File "C:\Users\archi\miniconda3\envs\ai-violin\Lib\site-packages\wandb\sdk\lib\run_messages.py", line 90, in loop
+    await asyncio_compat.race(
+  File "C:\Users\archi\miniconda3\envs\ai-violin\Lib\site-packages\wandb\sdk\lib\asyncio_compat.py", line 278, in race
+    async with open_task_group(race=True) as tg:
+  File "C:\Users\archi\miniconda3\envs\ai-violin\Lib\contextlib.py", line 217, in __aexit__
+    await anext(self.gen)
+  File "C:\Users\archi\miniconda3\envs\ai-violin\Lib\site-packages\wandb\sdk\lib\asyncio_compat.py", line 240, in open_task_group
+    await task_group._wait_all(race=race, timeout=exit_timeout)
+  File "C:\Users\archi\miniconda3\envs\ai-violin\Lib\site-packages\wandb\sdk\lib\asyncio_compat.py", line 180, in _wait_all
+    raise exc
+  File "C:\Users\archi\miniconda3\envs\ai-violin\Lib\site-packages\wandb\sdk\lib\run_messages.py", line 113, in _print_all
+    result = await handle.wait_async(timeout=None)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\archi\miniconda3\envs\ai-violin\Lib\site-packages\wandb\sdk\mailbox\mailbox_handle.py", line 127, in wait_async
+    response = await self._handle.wait_async(timeout=timeout)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\archi\miniconda3\envs\ai-violin\Lib\site-packages\wandb\sdk\mailbox\response_handle.py", line 123, in wait_async
+    raise HandleAbandonedError()
+wandb.sdk.mailbox.mailbox_handle.HandleAbandonedError

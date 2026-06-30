@@ -49,6 +49,10 @@ _cache/
 # BigVGAN-v2 self-test output
 bigvgan_selftest_out.wav
 
+# Arioso model artifacts (checkpoints + listening samples), kept out of data/
+Arioso/models/
+Arioso/samples/
+
 # ─────────────────────────────────────────────────────────────
 # Python
 # ─────────────────────────────────────────────────────────────
@@ -79,6 +83,7 @@ ENV/
 # ─────────────────────────────────────────────────────────────
 .env
 .env.*
+!.env.example
 *.key
 secrets.*
 
