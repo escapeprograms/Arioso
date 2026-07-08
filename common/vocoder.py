@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import sys
+import warnings
 
 import numpy as np
 import torch
@@ -49,6 +50,11 @@ def load_vocoder(device: str = "cpu", use_cuda_kernel: bool = False):
     Downloads the weights from the HF Hub on first call (cached thereafter).
     ``use_cuda_kernel`` selects the fused anti-aliased-activation CUDA kernel; we
     default to ``False`` (the PyTorch-native path) since it needs no build step.
+    When ``True`` but the kernel cannot be built (no CUDA toolkit / ``nvcc`` /
+    host compiler — common on machines that only ship PyTorch's bundled CUDA
+    runtime), we warn and transparently fall back to the PyTorch-native path. The
+    model still runs on ``device`` (the GPU is not lost); only the fused-kernel
+    speedup is skipped.
 
     We download config + weights directly rather than via BigVGAN's
     ``from_pretrained`` mixin: that mixin's ``_from_pretrained`` signature is
@@ -83,7 +89,20 @@ def load_vocoder(device: str = "cpu", use_cuda_kernel: bool = False):
             f"common.config (got, expected): {mismatch}"
         )
 
-    model = bigvgan.BigVGAN(h, use_cuda_kernel=use_cuda_kernel)
+    try:
+        model = bigvgan.BigVGAN(h, use_cuda_kernel=use_cuda_kernel)
+    except Exception as e:  # noqa: BLE001 - any kernel build/load failure should degrade, not crash
+        if not use_cuda_kernel:
+            raise
+        warnings.warn(
+            f"BigVGAN fused CUDA kernel unavailable ({type(e).__name__}: {e}); falling "
+            f"back to the PyTorch-native anti-aliased activation path. The vocoder still "
+            f"runs on '{device}' (GPU is NOT lost), just without the fused-kernel speedup. "
+            f"To enable it, install a CUDA 12.x toolkit (nvcc) + MSVC build tools — see "
+            f"common/README.md.",
+            RuntimeWarning,
+        )
+        model = bigvgan.BigVGAN(h, use_cuda_kernel=False)
 
     weight_file = hf_hub_download(
         repo_id=CHECKPOINT, filename="bigvgan_generator.pt")

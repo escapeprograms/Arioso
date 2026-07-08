@@ -85,6 +85,21 @@ lives in `common` (`DEFAULT_PEAK`, also the post-normalization clip guard). It a
 `PRIOR_LEVEL_MATCH="masked_rms"` (assembled by `synthesizePrior.quantized_prior`) and the prior
 build's output dirs `PRIOR_MEL_DIR` / `ONSETS_DIR` — so `TARGET_RMS_DBFS` is the **single source
 of truth** shared between GT loudness normalization and the prior's masked-RMS level match.
+Finally it owns the **VioPTT technique** knobs (consumed by `build_techniques`): `TECHNIQUE_DIR`
+(the output dir), `TECHNIQUE_CLASSES` — the id→name table below — `NO_TECHNIQUE_ID=4` /
+`REST_ID=5`, `TECHNIQUE_PAD_S=0.02` (per-note slice padding fed to VioPTT),
+`TECHNIQUE_REST_SNAP_FRAMES=10` (the legato/rest gap threshold), plus the **fixed-window** knobs
+`TECHNIQUE_NOTE_SECONDS=2.0` and `TECHNIQUE_PEAK_NORMALIZE=True`. VioPTT's note model was **trained
+on single notes pad/truncated to a fixed 2.0 s window then peak-normalized** (its RWC/MOSAPT note
+datasets; `--mosapt_fixed_seconds` default 2.0), so we reproduce that construction rather than
+VioPTT's own from-midi inference, which feeds variable-length un-normalized slices and skews short
+notes to `spiccato`. `TECHNIQUE_NOTE_SECONDS=None` (CLI `--note-seconds 0`) selects the legacy
+variable-length path (A/B only).
+
+**Technique class ids** (`TECHNIQUE_CLASSES`, index = id): `0 flageolet`, `1 normal`,
+`2 pizzicato`, `3 spiccato`, `4 no_technique`. Ids 0–4 are VioPTT's own
+`DEFAULT_TECHNIQUE_CLASSES` in order (its class ids); `5 rest` is **ours** — VioPTT never
+predicts it, it is only produced by the per-frame fill for stretches where nothing is sounding.
 
 ### clip_name.py — the one filename parser
 - `parse_clip_name(path)` → `ClipName(youtube_id, start, end, basename, composer, catalog,
@@ -125,6 +140,89 @@ each step to an injected, `Protocol`-typed component — swap any axis without a
   onset frames → `data/onsets_arioso/<base>.npy`. Reuses the manifest offset (no re-estimation);
   resumable + skip-existing. CLI flags `--no-anti-alias` / `--envelope` / `--level-match` for ablations.
 - CLI: `python -m DataSynthesizer.build_prior --limit 4` (smoke) | `python -m DataSynthesizer.build_prior` (full).
+
+### technique.py — VioPTT playing-technique classifier wrapper + pure helpers
+Thin wrapper around the pretrained **VioPTT** note-technique model (repo vendored under
+`external/VioPTT`) so the build reuses VioPTT's own inference code (`infer_note_technique_from_midi`)
+instead of reimplementing it, plus torch-free helpers to turn a MIDI score into per-note slice
+spans and expand VioPTT's per-note predictions into a per-frame id track on the `target_mel` grid.
+- **Two note sources, kept bit-identical.** The emitted onset frames MUST equal `onsets_arioso`
+  (the clip enumerator keys off it), so `note_groups_from_midi` parses notes with **pretty_midi**
+  and rounds with **np.round** exactly like `build_prior` — **not** VioPTT's raw-MIDI-event parser
+  (`parse_midi_to_note_events`), which would drift. VioPTT is used only for the audio→technique step.
+- **Mandatory transcription features.** The shipped note model was trained WITH transcription
+  features, so it MUST be built `use_trans_features=True` / `trans_feat_dim=352` and fed features
+  from the transcriptor checkpoint — the transcriptor is therefore also **mandatory** (a missing
+  one is fatal). Building without trans-features makes `load_state_dict` fail on a shape mismatch.
+- `_ensure_vioptt_on_path()` / `_import_vioptt()` — VioPTT's modules use **flat** imports, so both
+  its `piano_transcription/pytorch` and `.../utils` dirs go on `sys.path` (mirrors
+  `common.vocoder`'s BigVGAN vendoring), and importing them binds top-level `config` / `utilities`
+  / `models_contrast` / `pytorch_utils` to VioPTT's copies (inert — repo code only imports
+  package-qualified). Lazy (keeps the module torch-free for the pure helpers). Tripwire asserts
+  after import: VioPTT `config.sample_rate == 16000` and its class list matches `TECHNIQUE_CLASSES[:5]`
+  (catches sys.path shadowing / upstream drift).
+- `NoteGroup` (NamedTuple: `onset_frame, end_frame, start_s, end_s, n_notes`) — one distinct
+  rounded-onset frame's notes (chords / double-stops / sub-frame onsets merge into one group).
+- `note_groups_from_midi(midi_path, offset_s, n_frames, sr, hop)` — parse notes (same source as
+  `synthesizePrior.note_onsets`: pretty_midi `note.start`/`note.end`, all instrument tracks, no
+  filtering), shift by `offset_s`, group by `round(start*sr/hop)`, drop frames outside
+  `[0, n_frames)`. Per group `start_s`=min onset, `end_s`=max offset, `end_frame`=clip of
+  `round(end_s*sr/hop)` into `[onset_frame+1, n_frames]`. **INVARIANT:** `[g.onset_frame …]` equals
+  the saved `onsets_arioso` array (build asserts it).
+- `expand_to_frames(groups, tech_ids, n_frames, rest_snap)` — `[n_frames]` uint8, all-`REST_ID`
+  first (pre-first-onset frames stay rest). Each group fills from its onset with its technique id;
+  **hybrid rest policy**: if the gap to the next onset is `<= rest_snap`, the note extends to the
+  next onset (legato/rounding slack, no spurious rest sliver); else it stops at `end_frame` and the
+  gap stays rest.
+- `TechniqueClassifier(device="cuda", note_ckpt=NOTE_CKPT, transcriptor_ckpt=TRANSCRIPTOR_CKPT)` —
+  loads both checkpoints **once** (construct one, reuse across clips); falls back to CPU if cuda
+  is unavailable; raises `FileNotFoundError` if either ckpt is missing or the transcriptor fails to
+  build.
+- `prepare_chunks(wav_16k, spans_s, pad_s, note_seconds=TECHNIQUE_NOTE_SECONDS, peak_normalize=True)`
+  → `list[np.ndarray]`: builds the **exact** per-note arrays the model consumes. Onset-anchored
+  slice (`slice_waveform_by_notes`, `pad_s` context) → if `note_seconds` set, pad/truncate to
+  `round(note_seconds*16000)` samples with VioPTT's policy (**short → zeros appended at the end**,
+  note stays at the front; **long → first N samples**), matching `pad_truncate_sequence`
+  (`utils/utilities.py:84-88`) → optional peak-normalize `x/(max|x|+1e-8)`. `note_seconds=None` →
+  raw variable-length slices (legacy). All arrays contiguous float32. This is what the overlay
+  notebook auditions per note.
+- `classify(wav_16k, spans_s, pad_s, note_seconds=TECHNIQUE_NOTE_SECONDS, peak_normalize=True)` →
+  `(ids [K] int64, conf [K] float32)`: `prepare_chunks` → `infer_batch` (uniform fixed-window
+  lengths make its batch-max padding a no-op, so the model sees the training-time input); empty
+  spans → two empty arrays. The fixed 2 s window is the fix for the blanket-`spiccato` mislabeling.
+- Module constants: `VIOPTT_SR=16000` (VioPTT runs at 16 kHz — GT is resampled on load), `NOTE_CKPT`
+  / `TRANSCRIPTOR_CKPT` (`external/VioPTT/checkpoints/*.pth`). Training-window facts cite
+  `external/VioPTT/piano_transcription/utils/data_generator.py` (RWC/MOSAPT note datasets) and
+  `pytorch/main_note_technique.py`.
+
+### build_techniques.py — VioPTT technique labels over the dataset (one-time pass)
+Mirrors `build_prior.py`. For each `status==ok` clip, writes `data/technique_arioso/<base>.npy`
+(`[T]` uint8 per-frame technique ids, frame-aligned to `target_mel`) and
+`data/technique_arioso/<base>.notes.csv` (one row per note-group: the VioPTT prediction + span).
+- `process_clip(row, out_dir, dataset_root, clf, *, pad_s, note_seconds, overwrite)` —
+  `note_groups_from_midi` from the clip's MIDI + manifest `offset_ms`/`n_frames`; **onsets tripwire**
+  asserts the group onset frames equal `onsets_arioso` (else `AssertionError` — stale artifacts,
+  rebuild `build_prior`); `load_mono(gt, sr=VIOPTT_SR)` → `clf.classify(..., note_seconds=...)` →
+  `expand_to_frames` → save npy + CSV. GT path is built as `data/gt/<base>.wav` (the manifest's
+  `gt_path` is backslash-formatted, not parsed). Skip-existing (both files) unless `overwrite`. CSV
+  columns: `note_index, onset_frame, end_frame, start_s, end_s, n_notes, technique` (class-name
+  string), `confidence` (6-dp floats).
+- `build(out_dir, dataset_root, *, device, pad_s, note_seconds, note_ckpt, transcriptor_ckpt,
+  limit, overwrite)` — read ok rows, construct `TechniqueClassifier` **once**, loop with per-clip
+  try/except (`[i/N] status base` prints, failures logged to stderr + 1-frame traceback, continue),
+  summary.
+- CLI flags `--out-dir --dataset-root --limit --overwrite --device --pad-seconds --note-seconds
+  --note-ckpt --transcriptor-ckpt` (device default `cuda` if available else `cpu`; `--note-seconds`
+  default 2.0, `0` = legacy variable-length).
+- CLI: `python -m DataSynthesizer.build_techniques --limit 2` (smoke) | `python -m DataSynthesizer.build_techniques` (full).
+- **Fixed-window fix / stale labels:** each note is now classified on a fixed 2.0 s onset-anchored,
+  peak-normalized window matching VioPTT's training (`clf.classify` default). Labels written
+  **before** this change used VioPTT's variable-length un-normalized from-midi path and are
+  **stale** — they over-report `spiccato` on fast legato notes. Re-run with `--overwrite` to
+  replace them.
+- **Note:** VioPTT is still a pretrained black box — it labels each note with whatever class it
+  predicts; the pipeline broadcasts those predictions, it does not second-guess them. Matching the
+  training input distribution just makes those predictions trustworthy.
 
 ### download_audio.py — obtain, level-normalize + trim the GT violin audio (step 1)
 - `download_full_audio(youtube_id, cache_dir, sr=44100, audio_codec="wav")` — download a whole
@@ -188,8 +286,15 @@ mel so the spikes can be checked against note attacks. Launch Jupyter from the p
 PY="C:/Users/archi/Miniconda3/envs/ai-violin/python.exe"   # use the ai-violin env
 "$PY" -m DataSynthesizer.build_dataset --books Kayser --limit 2   # smoke test
 "$PY" -m DataSynthesizer.build_dataset                            # full build (~1021 clips)
+"$PY" -m DataSynthesizer.build_prior --limit 4                    # Arioso prior features (smoke)
+"$PY" -m DataSynthesizer.build_techniques --limit 2              # VioPTT technique labels (smoke)
+"$PY" -m DataSynthesizer.build_techniques                        # full technique pass (status==ok)
 "$PY" -m DataSynthesizer.onset_align prior.wav gt.wav             # report a (prior, GT) offset
 ```
+
+> **Technique pass ordering:** `build_techniques` requires `build_prior`'s `onsets_arioso` to
+> already exist (it asserts the two agree per clip). Run `build_prior` first; if `onsets_arioso`
+> is stale, rebuild it (`--overwrite`) before the technique pass.
 
 > **Adopting the level-normalization change:** existing `data/_cache/` downloads were saved
 > before normalization and won't be re-normalized on a cache hit. Clear `data/_cache/` once (and
@@ -218,3 +323,10 @@ PY="C:/Users/archi/Miniconda3/envs/ai-violin/python.exe"   # use the ai-violin e
 - **Voiced-RMS normalization** measures level over non-silent segments (`librosa.effects.split`,
   `VOICED_TOP_DB`) and applies one global gain, with a `DEFAULT_PEAK` clip guard; a very quiet
   source may land below `TARGET_RMS_DBFS` rather than clip.
+- **VioPTT technique pass** (`build_techniques`) needs two extra deps in **ai-violin**:
+  `torchlibrosa==0.1.0` and `h5py` (everything else — torch, librosa, pretty_midi — is already
+  present). It reuses VioPTT's vendored inference code (`external/VioPTT`, not on PyPI) and its two
+  checkpoints under `external/VioPTT/checkpoints/`. VioPTT runs at **16 kHz** (GT is resampled on
+  load, not the repo's 44.1 kHz), but the emitted per-frame track is on the **44.1 kHz / hop-512**
+  mel grid, so it aligns with `target_mel` / `prior_mel_arioso`. The note model **requires**
+  transcription features, so the transcriptor checkpoint is mandatory.

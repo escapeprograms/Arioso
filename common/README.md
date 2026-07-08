@@ -54,6 +54,36 @@ Import mechanics: run packages as modules from the project root
   on first load). Checkpoint: `nvidia/bigvgan_v2_44khz_128band_512x`.
 - `load_vocoder(device="cpu", use_cuda_kernel=False)` — load + assert the
   checkpoint's mel params equal the `config.py` contract (fails loudly on drift).
+  `use_cuda_kernel=True` selects the fused anti-aliased-activation CUDA kernel
+  (BigVGAN's main inference speedup). If the kernel can't be built, the loader
+  warns and falls back to the PyTorch-native path — **still on the GPU**, just
+  slower. See below to enable the real kernel.
+
+#### Enabling the fused BigVGAN CUDA kernel (optional speedup)
+
+`use_cuda_kernel=True` JIT-compiles a fused CUDA kernel at load time, which needs
+a full CUDA **toolkit** (not just PyTorch's bundled runtime) plus a host C++
+compiler. On a machine that lacks them, `torch.utils.cpp_extension.CUDA_HOME` is
+`None` and the build fails, so the loader falls back to the native path. To get
+the speedup (one-time, computer-level setup — several GB):
+
+1. **CUDA Toolkit 12.x** matching your PyTorch build (`python -c "import torch;
+   print(torch.version.cuda)"` — e.g. `12.4` for `torch 2.6.0+cu124`). Install
+   from NVIDIA; default path `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4`.
+   Ensure `%CUDA_PATH%\bin` is on `PATH` so `cpp_extension.CUDA_HOME` resolves
+   (it reads `CUDA_HOME` / `CUDA_PATH`); set `CUDA_HOME` to the same path if needed.
+2. **MSVC C++ build tools** — "Visual Studio 2022 Build Tools" with the "Desktop
+   development with C++" workload (provides `cl.exe`, required by
+   `cpp_extension.load()` on Windows).
+3. **Launch Jupyter from a shell where `cl.exe` is on `PATH`** — e.g. the
+   "x64 Native Tools Command Prompt for VS 2022" (or run `vcvars64.bat` first),
+   then start the kernel from there. Otherwise the build can't find the compiler.
+4. First load with `use_cuda_kernel=True` compiles the kernel (verbose, ~a minute)
+   into `external/BigVGAN/alias_free_activation/cuda/build/` and caches it; later
+   loads are fast. Success = no fallback `RuntimeWarning`.
+
+No BigVGAN source changes are needed: its hardcoded `sm_70`/`sm_80` arch flags are
+forward-compatible with newer GPUs (e.g. sm_89 Ada).
 - `mel_spectrogram(wav)` — mel via BigVGAN's own `meldataset.mel_spectrogram`,
   fed the `config.py` params, so it can never drift from the checkpoint. **Use
   this for any mel computation — do not re-implement an STFT.**

@@ -1,0 +1,15 @@
+# Unconditioned ablation — the minimal partial-override example.
+#
+# Only the keys that differ from the code defaults are listed; everything else falls back to
+# AriosoConfig() / RunSettings(). This drops the technique-conditioning embedding, so the model
+# has fewer parameters and its job is pure prior->target timbre with no per-frame signal.
+#
+# Usage:  python -m Arioso.train --config Arioso/configs/unconditioned.yaml
+
+config_version: 1
+
+model:
+  conditioning: []          # no per-frame conditioning (AriosoConfig(conditioning=()))
+
+run:
+  name: arioso_uncond       # W&B run name for the ablation

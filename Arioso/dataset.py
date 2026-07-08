@@ -11,6 +11,7 @@ target mels (memory-mapped, no audio re-windowing). Clips are variable length, s
 
 from __future__ import annotations
 
+import functools
 import os
 
 import numpy as np
@@ -18,16 +19,22 @@ import torch
 from torch.utils.data import DataLoader, Dataset, Sampler
 
 from .clips import Clip, enumerate_clips
-from .config import PRIOR_MEL_DIR, AriosoConfig
+from .config import PRIOR_MEL_DIR, AriosoConfig, CondSpec
 from .splits import make_split
 
 
 class AriosoDataset(Dataset):
-    """Returns ``(x0, x1)`` prior/target mel slices for a fixed clip pool."""
+    """Returns ``(x0, x1)`` prior/target mel slices for a fixed clip pool.
 
-    def __init__(self, out_dir: str, clips: list[Clip]):
+    When ``specs`` is non-empty each item also carries a ``"cond"`` dict mapping each spec name to
+    that clip's ``[T]`` int64 per-frame id track (mmap-sliced identically to the mels). With no
+    specs the item dict is exactly as before (no ``"cond"`` key).
+    """
+
+    def __init__(self, out_dir: str, clips: list[Clip], specs: tuple[CondSpec, ...] = ()):
         self.out_dir = out_dir
         self.clips = clips
+        self.specs = tuple(specs)
         self.prior_dir = os.path.join(out_dir, PRIOR_MEL_DIR)
         self.target_dir = os.path.join(out_dir, "target_mel")
 
@@ -43,11 +50,20 @@ class AriosoDataset(Dataset):
                      mmap_mode="r")[:, c.start:c.end]
         x1 = np.load(os.path.join(self.target_dir, c.basename + ".npy"),
                      mmap_mode="r")[:, c.start:c.end]
-        return {
+        item = {
             "x0": torch.from_numpy(np.ascontiguousarray(x0, dtype=np.float32)),
             "x1": torch.from_numpy(np.ascontiguousarray(x1, dtype=np.float32)),
             "length": c.end - c.start,
         }
+        if self.specs:
+            cond = {}
+            for spec in self.specs:
+                arr = np.load(os.path.join(self.out_dir, spec.dir, c.basename + ".npy"),
+                              mmap_mode="r")[c.start:c.end]
+                cond[spec.name] = torch.from_numpy(
+                    np.ascontiguousarray(arr).astype(np.int64))
+            item["cond"] = cond
+        return item
 
 
 class LengthBucketBatchSampler(Sampler):
@@ -81,8 +97,13 @@ class LengthBucketBatchSampler(Sampler):
         return len(self.batches)
 
 
-def collate(batch: list[dict]) -> dict:
-    """Pad a batch to its max length; return tensors + a ``[B, T]`` frame mask (1 real / 0 pad)."""
+def collate(batch: list[dict], specs: tuple[CondSpec, ...] = ()) -> dict:
+    """Pad a batch to its max length; return tensors + a ``[B, T]`` frame mask (1 real / 0 pad).
+
+    When ``specs`` is non-empty, also pack each spec's per-frame id track into ``out["cond"]``:
+    ``[B, T_max]`` long, initialized to the spec's ``pad_id`` and filled per item (the pad frames
+    are masked out by ``frame_mask`` anyway; ``pad_id`` just keeps them a valid embedding index).
+    """
     n_mels = batch[0]["x0"].shape[0]
     lengths = torch.tensor([b["length"] for b in batch], dtype=torch.long)
     t_max = int(lengths.max())
@@ -95,17 +116,33 @@ def collate(batch: list[dict]) -> dict:
         x0[i, :, :ln] = item["x0"]
         x1[i, :, :ln] = item["x1"]
         mask[i, :ln] = 1.0
-    return {"x0": x0, "x1": x1, "frame_mask": mask, "lengths": lengths}
+    out = {"x0": x0, "x1": x1, "frame_mask": mask, "lengths": lengths}
+    if specs:
+        cond = {}
+        for spec in specs:
+            packed = torch.full((b, t_max), spec.pad_id, dtype=torch.long)
+            for i, item in enumerate(batch):
+                ln = item["length"]
+                packed[i, :ln] = item["cond"][spec.name]
+            cond[spec.name] = packed
+        out["cond"] = cond
+    return out
 
 
 def build_dataloader(out_dir: str, split_name: str, batch_size: int,
                      cfg: AriosoConfig | None = None, shuffle: bool = True,
                      num_workers: int = 0) -> DataLoader:
-    """DataLoader over the clip pool for a split ('train'|'val'), length-bucketed + masked."""
+    """DataLoader over the clip pool for a split ('train'|'val'), length-bucketed + masked.
+
+    Conditioning (``cfg.conditioning``) flows through: the dataset loads each spec's id track and
+    ``collate`` (bound to the specs via ``functools.partial``, kept picklable for num_workers>0)
+    packs it into ``batch["cond"]``.
+    """
     cfg = cfg or AriosoConfig()
     split = make_split(out_dir, cfg)
     clips = enumerate_clips(out_dir, split[split_name], cfg)
-    ds = AriosoDataset(out_dir, clips)
+    ds = AriosoDataset(out_dir, clips, specs=cfg.conditioning)
     sampler = LengthBucketBatchSampler(ds.lengths(), batch_size, shuffle=shuffle, seed=cfg.seed)
-    loader = DataLoader(ds, batch_sampler=sampler, collate_fn=collate, num_workers=num_workers)
+    collate_fn = functools.partial(collate, specs=cfg.conditioning)
+    loader = DataLoader(ds, batch_sampler=sampler, collate_fn=collate_fn, num_workers=num_workers)
     return loader

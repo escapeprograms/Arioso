@@ -24,7 +24,7 @@ from scipy.fft import dct
 
 from DataSynthesizer.config import DEFAULT_OUT
 
-from ..config import PRIOR_MEL_DIR, AriosoConfig
+from ..config import PRIOR_MEL_DIR, cfg_from_dict
 from ..infer import generate_mel
 from ..model import AriosoModel
 from ..splits import make_split
@@ -79,9 +79,11 @@ def main() -> None:
     ap.add_argument("--plot", help="path to save one Delta-mel figure (first recording)")
     args = ap.parse_args()
 
-    cfg = AriosoConfig()
+    # Build the model from the checkpoint's embedded config (pre-conditioning ckpts -> old arch).
+    ckpt = torch.load(args.ckpt, map_location=args.device)
+    cfg = cfg_from_dict(ckpt.get("cfg") or {})
     model = AriosoModel(cfg).to(args.device)
-    model.load_state_dict(torch.load(args.ckpt, map_location=args.device)[args.weights])
+    model.load_state_dict(ckpt[args.weights])
     model.eval()
 
     prior_dir = os.path.join(args.out_dir, PRIOR_MEL_DIR)
@@ -93,7 +95,23 @@ def main() -> None:
             continue
         prior = np.load(pp).astype(np.float32)
         target = np.load(tp).astype(np.float32)
-        pred = generate_mel(model, prior, cfg, args.device).astype(np.float32)
+
+        # Load each conditioning signal's per-frame id track (same skip/warn as a missing mel);
+        # tracks are on the prior mel's frame grid, so no slicing before generate_mel.
+        cond_frames = {}
+        missing_cond = False
+        for spec in cfg.conditioning:
+            cp = os.path.join(args.out_dir, spec.dir, base + ".npy")
+            if not os.path.isfile(cp):
+                missing_cond = True
+                break
+            cond_frames[spec.name] = np.load(cp)[:prior.shape[-1]]
+        if missing_cond:
+            continue
+        cond_frames = cond_frames or None
+
+        pred = generate_mel(model, prior, cfg, args.device,
+                            cond_frames=cond_frames).astype(np.float32)
         t = min(pred.shape[-1], target.shape[-1])
         recon_mse += float(np.mean((pred[:, :t] - target[:, :t]) ** 2))
         prior_mse += float(np.mean((prior[:, :t] - target[:, :t]) ** 2))

@@ -1,0 +1,22 @@
+# LR-annealing run — cosine decay from peak LR to a non-zero floor.
+#
+# The baseline default already anneals (cosine to lr_min=0.0), so this config makes the
+# annealing knobs explicit and anneals to a 10%-of-peak floor instead — the common recipe
+# when late-training updates at LR≈0 stop improving the EMA. Set lr_min: 0.0 for the pure
+# baseline, or lr_schedule: linear / constant to ablate the shape (Arioso.schedules.SCHEDULES).
+#
+# Usage:  python -m Arioso.train --config Arioso/configs/lr_anneal.yaml
+
+#this is a test to see if annealing has any meaningful affect
+config_version: 1
+
+model:
+  lr: 2.0e-4                # peak LR after warmup (write floats as 2.0e-4, not 2e-4)
+  lr_schedule: cosine       # post-warmup anneal shape: constant | linear | cosine
+  lr_min: 2.0e-5            # LR floor reached at total_steps (10% of peak)
+  warmup_steps: 4000        # linear ramp 0 -> lr before annealing starts
+  conditioning: []          # disabled: run unconditioned (no technique tracks needed)
+  total_steps: 20000
+
+run:
+  name: arioso_lr_anneal

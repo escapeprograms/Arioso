@@ -1,0 +1,79 @@
+# Arioso default run-config — every overridable key at its code default.
+#
+# This file doubles as the schema documentation: it lists every YAML key you can set and its
+# baseline value. A run-config is a PARTIAL OVERRIDE — you only need the keys you want to change;
+# missing keys fall back to these same code defaults. Verification asserts this file loads to
+# exactly AriosoConfig() + RunSettings(), so it can never drift from the code.
+#
+# Usage:  python -m Arioso.train --config Arioso/configs/default.yaml
+# Precedence:  smoke clamps > CLI flags > this YAML > code defaults.
+#
+# PyYAML gotcha: a bare 2e-4 parses as a STRING, not a float. Always write floats with a decimal
+# point AND the exponent sign, e.g. 2.0e-4 (the loader also coerces "2e-4" -> 2e-4, but the
+# explicit form is unambiguous). Booleans must be true/false; tuple fields are YAML lists.
+
+config_version: 1
+
+# model: -> AriosoConfig fields (the run's science; embedded in every checkpoint).
+# NOTE: sr / hop / n_mels / in_ch are LOCKED (mel contract in common.config) and are rejected here.
+model:
+  # --- Model architecture ---
+  hidden: 384                  # model width; must equal dit_heads * dit_head_dim
+  t_emb_dim: 256               # sinusoidal timestep-embedding width
+  # WaveNet
+  wn_blocks: 20                # number of dilated conv blocks (must equal len(dilations))
+  wn_kernel: 3
+  wn_dilation_cycle: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]   # tuple field -> YAML list
+  wn_dilation_repeats: 2       # cycle repeated this many times -> 20 blocks
+  # DiT
+  dit_blocks: 3                # AdaLN-Zero + RoPE transformer blocks
+  dit_heads: 6                 # attention heads; heads * head_dim must equal hidden
+  dit_head_dim: 64
+  dit_ffn: 1536                # DiT feed-forward width
+  rope_base: 10000.0           # RoPE base frequency (float)
+
+  # --- Per-frame conditioning ---
+  # A list of signals: a registered name (string), a registered name as a mapping with overrides,
+  # or a novel inline mapping (needs name/num_classes/emb_dim/dir). [] -> unconditioned ablation.
+  conditioning: [technique]
+  cond_dropout: 0.0            # CFG dropout fraction (deferred toggle, OFF)
+
+  # --- OT-CFM objective ---
+  sigma: 1.0e-4               # OT-CFM near-straight-path constant (float)
+  loss: masked_mse            # velocity loss; see Arioso.cfm.LOSSES
+  path_aug_p: 0.0             # off-path augmentation: fraction of train samples perturbed off the OT line (0 = off)
+  path_aug_std: 1.0           # off-path noise scale; effective displacement std is path_aug_std*t(1-t) (float)
+
+  # --- Training ---
+  lr: 2.0e-4                  # AdamW peak learning rate (float)
+  lr_schedule: cosine         # post-warmup anneal shape; see Arioso.schedules.SCHEDULES
+  lr_min: 0.0                 # LR floor at total_steps (float)
+  weight_decay: 0.01
+  warmup_steps: 4000
+  total_steps: 200000
+  grad_clip: 1.0              # grad-norm clip (float)
+  ema_max: 0.9999            # EMA decay ceiling (float)
+  seed: 0
+  val_frac: 0.10             # fraction of pieces held out for eval (float)
+
+  # --- Clip enumeration ---
+  l_min_s: 5.0               # min clip length, seconds (float)
+  target_s: 10.0            # target clip length, seconds (float)
+
+  # --- Inference ---
+  solver: euler             # ODE solver; see Arioso.solvers.SOLVERS
+  solver_steps: 24          # outer integration steps
+  chunk_frames: 860
+  overlap_frames: 16
+
+# run: -> RunSettings fields (runtime/env knobs; NEVER embedded in checkpoints).
+run:
+  out_dir: data             # data root holding prior/target mels + the split
+  batch_size: 8
+  steps: null               # total-steps cap; null -> model.total_steps
+  log_every: 50
+  ckpt_every: 5000
+  val_every: 2000
+  device: null              # null -> cuda if available else cpu
+  wandb: true               # log to W&B when WANDB_API_KEY is set
+  name: null                # W&B run name; null -> auto_run_name(cfg)
