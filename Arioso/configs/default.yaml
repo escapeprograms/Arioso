@@ -77,3 +77,4 @@ run:
   device: null              # null -> cuda if available else cpu
   wandb: true               # log to W&B when WANDB_API_KEY is set
   name: null                # W&B run name; null -> auto_run_name(cfg)
+  resume: false             # continue from the highest step checkpoint in this run's folder (requires an explicit name)

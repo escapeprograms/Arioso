@@ -1,0 +1,6 @@
+scope,best_alpha,best_rmse,baseline_rmse,improvement
+overall,1.75,2.8703,3.0697,+6.5%
+overall (masked),1.75,2.7090,2.9379,+7.8%
+Kayser,1.75,2.8384,3.0292,+6.3%
+Paganini,1.75,2.9558,3.2444,+8.9%
+Wohlfahrt,1.5,2.8063,2.9387,+4.5%

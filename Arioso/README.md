@@ -137,7 +137,9 @@ score .mid ─ synthesizePrior.quantized_prior().render (polyBLEP saw, quantized
   `cond = {k: v.to(device) …}` from `batch["cond"]` (or `None`) and pass `cond=` to the model.
   Checkpoints and the W&B config embed the config via `cfg_to_dict` (weights_only-safe). `--smoke`
   for a short validation run. Logs loss/lr/val-MSE to W&B (`archimedesli/Arioso`) when
-  `WANDB_API_KEY` is set; `--no-wandb` opts out. The train step applies `perturb_off_path` when
+  `WANDB_API_KEY` is set; `--no-wandb` opts out. `--resume` continues a named run from its highest
+  step checkpoint; optimizer state is not saved so AdamW restarts cold (a brief loss bump that
+  washes out), and it requires an explicit run name. The train step applies `perturb_off_path` when
   `cfg.path_aug_p > 0`. `evaluate()` reports velocity MSE over a 10-point `T_GRID` (round-robin per
   sample) both **on-path** (`val/velocity_mse`) and **off-path** (`val/offpath_velocity_mse`, a
   fixed-seed `OFFPATH_EVAL_STD` perturbation — a restoration probe comparable across runs), plus

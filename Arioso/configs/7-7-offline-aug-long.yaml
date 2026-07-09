@@ -1,0 +1,25 @@
+# Off-path augmentation run (7-7) — lr_anneal recipe + the new training augmentation.
+#
+# Identical to lr_anneal.yaml (cosine anneal to a 10%-of-peak floor, unconditioned, 20k steps)
+# but with off-path augmentation ON: half the train samples are nudged off the OT line
+# (x_t + std*t(1-t)*z) with the target re-aimed at the path endpoint, teaching the field a
+# restoring component (the v1 diagnosis found none). Compare val/offpath_velocity_mse against
+# the lr_anneal baseline to judge the effect.
+#
+# Usage:  python -m Arioso.train --config Arioso/configs/7-7-offline-aug.yaml
+
+config_version: 1
+
+model:
+  lr: 2.0e-4                # peak LR after warmup (write floats as 2.0e-4, not 2e-4)
+  lr_schedule: cosine       # post-warmup anneal shape: constant | linear | cosine
+  lr_min: 2.0e-5            # LR floor reached at total_steps (10% of peak)
+  warmup_steps: 4000        # linear ramp 0 -> lr before annealing starts
+  conditioning: []          # disabled: run unconditioned (no technique tracks needed)
+  total_steps: 80000
+  path_aug_p: 0.25           # off-path augmentation ON: fraction of train samples perturbed
+  path_aug_std: 3.5         # calibrated to measured inference drift ~1.34*t (diagnose_field Test 4):
+                            # peak displacement std/4 at t=0.5 matches the observed 0.669 drift there
+
+run:
+  name: 7-7-offline-aug

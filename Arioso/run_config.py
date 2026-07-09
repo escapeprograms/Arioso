@@ -68,6 +68,7 @@ class RunSettings:
     device: str | None = None      # None -> "cuda" if available else "cpu" (resolved in main)
     wandb: bool = True
     name: str | None = None        # W&B run name; None -> auto_run_name(cfg)
+    resume: bool = False           # load latest step ckpt from this run's folder; optimizer state not restored
 
 
 # --- YAML -> dataclass loading ---------------------------------------------------
@@ -285,11 +286,12 @@ def merge_cli_overrides(run: RunSettings, args) -> RunSettings:
 
     Implements the CLI > YAML > defaults slice of the precedence chain. ``args`` is the argparse
     namespace whose run-level flags default to ``None`` sentinels, so an unspecified flag leaves the
-    YAML/default value untouched. ``--steps`` maps to ``steps``; ``--wandb/--no-wandb`` to ``wandb``.
+    YAML/default value untouched. ``--steps`` maps to ``steps``; ``--wandb/--no-wandb`` to ``wandb``;
+    ``--resume/--no-resume`` to ``resume``.
     """
     overrides = {}
     for field in ("out_dir", "batch_size", "steps", "log_every", "ckpt_every",
-                  "val_every", "device", "wandb", "name"):
+                  "val_every", "device", "wandb", "name", "resume"):
         val = getattr(args, field, None)
         if val is not None:
             overrides[field] = val

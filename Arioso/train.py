@@ -5,6 +5,11 @@ cosine by default), grad-norm clip 1.0, bf16
 mixed precision, and an EMA of the weights for inference (warmup schedule prevents the EMA from
 retaining random init early). Checkpoints both raw and EMA weights. ``--smoke`` runs a short loop
 on a tiny subset to validate the pipeline end-to-end.
+
+``--resume`` continues a named run from the highest step checkpoint in its folder (raw + EMA weights
+restored, step continued at N+1). Optimizer state is not checkpointed, so AdamW restarts cold — a
+brief loss bump that washes out. A resume starts a fresh W&B run with the same name, continuing the
+step axis so charts align.
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ import argparse
 import copy
 import dataclasses
 import os
+import re
 
 import torch
 
@@ -32,8 +38,10 @@ from .schedules import lr_at
 # old t=0.5 metric (which was also contaminated by the known x1-leak at t=0.5).
 T_GRID = tuple(round(0.05 + 0.1 * i, 2) for i in range(10))
 # Off-path eval perturbation scale — fixed and independent of cfg.path_aug_std, so the off-path
-# robustness metric is comparable across augmented and baseline (aug-off) runs.
-OFFPATH_EVAL_STD = 1.0
+# robustness metric is comparable across augmented and baseline (aug-off) runs. Calibrated to the
+# measured inference drift (diagnose_field Test 4: drift ~ 1.34*t per-element RMS): the probe's
+# peak displacement std/4 at t=0.5 matches the observed mid-path drift of ~0.67.
+OFFPATH_EVAL_STD = 2.7
 
 
 def _load_dotenv(path: str = ".env") -> None:
@@ -171,18 +179,31 @@ def train(cfg: AriosoConfig, run_s: RunSettings) -> None:
     log_every, ckpt_every, val_every = run_s.log_every, run_s.ckpt_every, run_s.val_every
     total_steps = run_s.steps if run_s.steps is not None else cfg.total_steps
     loss_fn = LOSSES[cfg.loss]                # velocity loss, chosen once (validated at load time)
+    if run_s.resume and run_s.name is None:
+        # Auto-generated run names embed a launch timestamp, so they can never match an existing
+        # folder; resume must target a known folder by name.
+        raise ValueError("--resume requires an explicit run name (--run-name or run.name in YAML)")
     # Each run gets its own subfolder under Arioso/models/ (named for the run) so its checkpoints
     # + resolved config stay grouped and don't collide across runs. Re-running the same run name
     # reuses the folder (step-named checkpoints overwrite), which is the intended behavior.
     run_name = run_s.name or auto_run_name(cfg)
+    run_s = dataclasses.replace(run_s, name=run_name)   # record the resolved name in saved config
     ckpt_dir = os.path.join(CKPT_DIR, run_name)   # Arioso/models/<run_name>/ — model artifacts
+    # Resolve the resume checkpoint before creating anything, so a mistyped run name fails clean
+    # instead of leaving an empty run folder + resolved config behind.
+    resume_ckpt = _latest_checkpoint(ckpt_dir) if run_s.resume else None
+    if run_s.resume and resume_ckpt is None:
+        raise FileNotFoundError(
+            f"--resume: no checkpoint_step<N>.pt in {ckpt_dir} (only checkpoint_final.pt may exist "
+            f"if the run finished, which is not resumable).")
     os.makedirs(ckpt_dir, exist_ok=True)
 
     # Reproducibility: dump the fully-resolved config into the run folder, upload to W&B.
     run = (_init_wandb(cfg, {**dataclasses.asdict(run_s), "resolved_total_steps": total_steps},
                        run_name) if run_s.wandb else None)
     resolved_path = os.path.join(ckpt_dir, "config.yaml")
-    save_resolved_config(cfg, run_s, resolved_path)
+    # A resolved config reproduces the run from scratch, never implicitly resumes -> force resume=False.
+    save_resolved_config(cfg, dataclasses.replace(run_s, resume=False), resolved_path)
     print(f"  resolved config -> {resolved_path}")
     if run:
         run.save(resolved_path, policy="now")
@@ -198,8 +219,12 @@ def train(cfg: AriosoConfig, run_s: RunSettings) -> None:
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     use_amp = device.startswith("cuda")
 
+    step = _load_resume(resume_ckpt, model, ema, cfg, device) if resume_ckpt else 0
+    if run_s.resume and step >= total_steps:
+        print(f"  [resume] checkpoint step {step} is at/past total_steps ({total_steps}); the loop "
+              f"will just save a final checkpoint and exit")
+
     model.train()
-    step = 0
     while step < total_steps:
         sampler = train_loader.batch_sampler
         if hasattr(sampler, "set_epoch"):
@@ -260,6 +285,45 @@ def _save(ckpt_dir, model, ema, cfg, step, final=False) -> None:
     print(f"  saved {path}")
 
 
+def _latest_checkpoint(ckpt_dir: str) -> tuple[str, int] | None:
+    """Return ``(path, N)`` for the highest-step ``checkpoint_step<N>.pt`` in ``ckpt_dir``, else None.
+
+    ``checkpoint_final.pt`` is deliberately excluded: a finished run has nothing to resume.
+    """
+    if not os.path.isdir(ckpt_dir):
+        return None
+    best: tuple[str, int] | None = None
+    for fname in os.listdir(ckpt_dir):
+        m = re.fullmatch(r"checkpoint_step(\d+)\.pt", fname)
+        if m and (best is None or int(m.group(1)) > best[1]):
+            best = (os.path.join(ckpt_dir, fname), int(m.group(1)))
+    return best
+
+
+def _load_resume(resume_ckpt: tuple[str, int], model, ema, cfg, device) -> int:
+    """Restore the ``(path, N)`` step checkpoint into ``model``/``ema``; return the step to continue at.
+
+    Optimizer state is not checkpointed, so AdamW moments restart cold (a brief loss bump). A config
+    drift between the checkpoint and the current run is warned (not hard-erroring — extending a run
+    by raising total_steps is legitimate; a real architecture mismatch fails in load_state_dict).
+    """
+    path, n = resume_ckpt
+    ckpt = torch.load(path, map_location=device)
+    cur = cfg_to_dict(cfg)
+    old = ckpt["cfg"]
+    differ = sorted(k for k in set(cur) | set(old) if cur.get(k) != old.get(k))
+    if differ:
+        print("  [resume] WARNING: config differs from the checkpoint (continuing anyway):")
+        for k in differ:
+            print(f"    {k}: checkpoint={old.get(k)!r} -> current={cur.get(k)!r}")
+    model.load_state_dict(ckpt["model"])
+    ema.shadow.load_state_dict(ckpt["ema"])
+    print(f"  [resume] loaded checkpoint_step{n}.pt -> continuing at step {ckpt['step'] + 1}")
+    print("  [resume] optimizer state restarts cold (no opt state checkpointed; brief loss bump)")
+    # step-N ckpt is saved after step N's opt.step()/ema.update() and before step += 1 -> resume N+1.
+    return ckpt["step"] + 1
+
+
 def main() -> None:
     _load_dotenv()   # load PYTORCH_CUDA_ALLOC_CONF / WANDB_API_KEY before any CUDA init
     ap = argparse.ArgumentParser(description=__doc__,
@@ -285,6 +349,9 @@ def main() -> None:
     ap.add_argument("--wandb", action=argparse.BooleanOptionalAction, default=None,
                     help=f"log to W&B ({WANDB_ENTITY}/{WANDB_PROJECT}); needs WANDB_API_KEY "
                          "in env or .env (default: YAML/on)")
+    ap.add_argument("--resume", action=argparse.BooleanOptionalAction, default=None,
+                    help="continue a named run from its highest step checkpoint (optimizer state "
+                         "not restored; requires --run-name) (default: YAML/off)")
     args = ap.parse_args()
 
     # Resolve precedence: code defaults -> YAML -> CLI -> (device fallback) -> smoke clamps.
