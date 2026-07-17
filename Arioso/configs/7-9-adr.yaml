@@ -1,0 +1,31 @@
+# Anti-Drift Rectification run (7-9) — lr_anneal recipe + ADR aux loss (path-aug OFF to isolate it).
+#
+# Same recipe as lr_anneal.yaml / 7-7-offline-aug.yaml (cosine anneal to a 10%-of-peak floor,
+# unconditioned, 20k steps) but with Anti-Drift Rectification ON: every step a second forward
+# drift-simulates from the model's own velocity and penalizes the drifted state's direction toward
+# data, teaching the field a restoring component (the v1 diagnosis found none). ADR from DEFAR
+# (arXiv 2606.28226); ADR only, no Frequency Compensation. Path augmentation is OFF here so the
+# effect measured against the lr_anneal baseline (val/offpath_velocity_mse, the probe notebook's
+# restore-cos) is ADR's alone.
+#
+# adr_beta MUST be swept: this 1.0 is a starting point, not tuned. L_ADR is a squared diff of unit
+# vectors (<=4 per sample, typically <<1) on a different scale than the paper's beta1=10 (which
+# weighted ADR relative to an FC-reweighted FM branch we do not use). Sweep {0.5, 1, 2, 5, 10}.
+#
+# Usage:  python -m Arioso.train --config Arioso/configs/7-9-adr.yaml
+
+config_version: 1
+
+model:
+  lr: 2.0e-4                # peak LR after warmup (write floats as 2.0e-4, not 2e-4)
+  lr_schedule: cosine       # post-warmup anneal shape: constant | linear | cosine
+  lr_min: 2.0e-5            # LR floor reached at total_steps (10% of peak)
+  warmup_steps: 4000        # linear ramp 0 -> lr before annealing starts
+  conditioning: []          # disabled: run unconditioned (no technique tracks needed)
+  total_steps: 20000
+  adr_beta: 1.0             # ADR loss weight (START point — must be swept, see header)
+  adr_p: 1.0                # ADR applied every step (paper-faithful)
+  # path_aug left at code default (OFF) to isolate ADR's effect
+
+run:
+  name: 7-9-adr

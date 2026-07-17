@@ -97,9 +97,15 @@ class AriosoConfig:
     loss: str = "masked_mse"         # velocity loss; see Arioso.cfm.LOSSES
     # Off-path augmentation (deferred toggle, OFF): for a Bernoulli(path_aug_p) subset of train
     # samples, perturb x_t off the OT line and re-aim the target so constant velocity still lands on
-    # the path endpoint at t=1 — teaching the field a restoring component. See Arioso.cfm.perturb_off_path.
+    # the path endpoint at t=1 — teaching the field a restoring component. See Arioso.augment.perturb_off_path.
     path_aug_p: float = 0.0          # fraction of train samples perturbed off the OT line (0 = off)
     path_aug_std: float = 1.0        # noise scale; effective displacement std is path_aug_std*t(1-t) <= std/4
+    # Anti-Drift Rectification (deferred toggle, OFF): a second forward drift-simulates from the
+    # model's own velocity and penalizes the drifted state's direction toward data — teaching a
+    # restoring component (DEFAR, arXiv 2606.28226; ADR only, no Frequency Compensation). See
+    # Arioso.augment.
+    adr_beta: float = 0.0            # ADR loss weight in L = L_FM + adr_beta*L_ADR (0 = off)
+    adr_p: float = 1.0               # fraction of steps ADR is applied (per-step Bernoulli gate; paper: 1.0)
 
     # --- Training (Section 8) ----------------------------------------------------
     lr: float = 2e-4
@@ -159,6 +165,9 @@ class AriosoConfig:
         # Off-path augmentation invariants.
         assert 0.0 <= self.path_aug_p <= 1.0, "path_aug_p must be in [0.0, 1.0]"
         assert self.path_aug_std >= 0.0, "path_aug_std must be >= 0.0"
+        # Anti-Drift Rectification invariants.
+        assert self.adr_beta >= 0.0, "adr_beta must be >= 0.0"
+        assert 0.0 <= self.adr_p <= 1.0, "adr_p must be in [0.0, 1.0]"
 
 
 # --- Checkpoint (de)serialization ------------------------------------------------

@@ -81,7 +81,8 @@ line) and owns the build-specific constants: `FADE_MS=5.0`, `BOOKS`, `DEFAULT_DA
 `DEFAULT_OUT`, the target-normalization knobs `TARGET_RMS_DBFS=-20.0` / `VOICED_TOP_DB=40.0`,
 and the onset-mask knobs `ONSET_DECAY_MS=50.0` / `ONSET_DECAY_FLOOR=0.01`. The peak target
 lives in `common` (`DEFAULT_PEAK`, also the post-normalization clip guard). It also owns the
-**Arioso prior** knobs — `PRIOR_ANTI_ALIAS=True` / `PRIOR_ENVELOPE="rect"` /
+**Arioso prior** knobs — `PRIOR_SOURCE="additive"` / `PRIOR_HARMONIC_LAW="corner"` /
+`PRIOR_ALPHA=1.0` / `PRIOR_CORNER_NC=8.0` / `PRIOR_CORNER_P=2.0` / `PRIOR_ENVELOPE="rect"` /
 `PRIOR_LEVEL_MATCH="masked_rms"` (assembled by `synthesizePrior.quantized_prior`) and the prior
 build's output dirs `PRIOR_MEL_DIR` / `ONSETS_DIR` — so `TARGET_RMS_DBFS` is the **single source
 of truth** shared between GT loudness normalization and the prior's masked-RMS level match.
@@ -116,15 +117,23 @@ each step to an injected, `Protocol`-typed component — swap any axis without a
 - `PitchTrajectory` → per-note f0 curve: `Quantized` (constant MIDI pitch, baseline) | `PitchBend`
   (pitch-wheel-following: vibrato/slides, ±2 semitones).
 - `SourceSynth` → unit saw from an f0 curve: `NaiveSaw` (`scipy.signal.sawtooth`) | `BandlimitedSaw`
-  (polyBLEP, removes fold-back aliasing). Both phase-accumulate via an **exclusive prefix-sum phase**
-  so a constant f0 reduces exactly to the old `arange(n)·dt` math (outputs stay numerically identical).
+  (polyBLEP, removes fold-back aliasing) | `AdditiveSaw` (a summed sine bank whose per-harmonic
+  amplitudes come from a `HarmonicAmps` law, so the ladder can be *shaped*; band-limited below
+  Nyquist, chunked over harmonics, `−2/π` scaled so `AlphaTilt(1.0)` is the saw's Fourier series).
+  All phase-accumulate via an **exclusive prefix-sum phase** so a constant f0 reduces exactly to the
+  old `arange(n)·dt` math (the saws stay numerically identical to before).
+- `HarmonicAmps` (additive only) → amplitude per 1-based harmonic index: `AlphaTilt(alpha)` (`n^-alpha`,
+  `alpha=1` is the saw ladder) | `RoundedCorner(n_c, p, alpha_below)` (`n^-alpha_below / sqrt(1+(n/n_c)^2p)`
+  — the `n_c=8, p=2` sweep winner, RMSE 3.070→2.718).
 - `Envelope` → `HardGate` ("rect", hard on/off) | `Fade` (~5 ms anti-click ramp via `_fade_envelope`).
 - `BodyFilter` → `Identity` (the no-EQ baseline; the seam for a future static body-EQ).
 - `Leveler` (`fit`/`apply`) → `MaskedRMS(target_rms_dbfs)` (scale so sounding-frame RMS hits the
   target) | `Peak` (legacy peak-normalize to `DEFAULT_PEAK`). The level match is a component, not
   baked into render. The mel front-end is **not** in the pipeline — callers mel after any alignment shift.
-- `quantized_prior(anti_alias=, envelope=, level_match=, target_rms_dbfs=, sr=)` — factory that
-  assembles the spec-baseline quantized pipeline from the `PRIOR_*` config knobs.
+- `quantized_prior(source=, harmonic_law=, alpha=, corner_nc=, corner_p=, envelope=, level_match=,
+  target_rms_dbfs=, sr=)` — factory that assembles the spec-baseline quantized pipeline from the
+  `PRIOR_*` config knobs (defaults = the additive rounded-corner prior); `_make_source` /
+  `_make_harmonic_amps` are the private assembly seams (unknown name → `ValueError`).
 - `render_prior(midi_path, sr=44100, total_samples=None)` / `render_prior_bend(...)` — thin wrappers
   for the legacy **peak-normalized** quantized / pitch-bend priors (used by `build_dataset`).
   `total_samples` defaults to the MIDI end time; pass the GT length to force exact pair alignment.
@@ -135,10 +144,11 @@ each step to an injected, `Protocol`-typed component — swap any axis without a
 
 ### build_prior.py — Arioso prior features over the dataset (one-time pass)
 - `build(...)` / `process_clip(row, ...)` — pass over `manifest.csv` (status==ok): assemble the
-  spec-faithful prior via `quantized_prior` (anti-aliased saw + masked-RMS to `TARGET_RMS_DBFS`),
+  spec-faithful prior via `quantized_prior` (shaped additive saw + masked-RMS to `TARGET_RMS_DBFS`),
   shift by the manifest `offset_ms`, mel it → `data/prior_mel_arioso/<base>.npy`, and write aligned
   onset frames → `data/onsets_arioso/<base>.npy`. Reuses the manifest offset (no re-estimation);
-  resumable + skip-existing. CLI flags `--no-anti-alias` / `--envelope` / `--level-match` for ablations.
+  resumable + skip-existing. CLI flags `--source` / `--harmonic-law` / `--alpha` / `--corner-nc` /
+  `--corner-p` / `--envelope` / `--level-match` for ablations.
 - CLI: `python -m DataSynthesizer.build_prior --limit 4` (smoke) | `python -m DataSynthesizer.build_prior` (full).
 
 ### technique.py — VioPTT playing-technique classifier wrapper + pure helpers

@@ -20,11 +20,15 @@ The data layer (spec Sections 3-5) is **~80% pre-built** by `DataSynthesizer/` +
 `prior_mel_quant`, and the BigVGAN-matched mel front-end. Arioso **reuses** all of it. It adds:
 
 - a **spec-faithful prior**, built by `DataSynthesizer.build_prior` (`DataSynthesizer.synthesizePrior`'s
-  composable `PriorSynth`: anti-aliased polyBLEP saw + **masked-RMS level match**) into
-  `data/prior_mel_arioso/`. (The built `prior_mel_quant` is a *naive aliased*, *peak-normalized* saw;
-  the level mismatch derails OT-CFM transport, which the masked-RMS fixes.) The prior is a **dataset
-  artifact owned by DataSynthesizer**; Arioso just consumes the mels and rebuilds the same prior at
-  inference via `synthesizePrior.quantized_prior`.
+  composable `PriorSynth`: **shaped additive saw** (rounded-corner harmonic ladder, `n_c=8`) +
+  **masked-RMS level match**) into `data/prior_mel_arioso/`. (The built `prior_mel_quant` is a
+  *naive aliased*, *peak-normalized* saw; the level mismatch derails OT-CFM transport, which the
+  masked-RMS fixes. The corner law drops the saw's HF excess the targets don't carry — mel RMSE
+  3.070→2.718.) The prior is a **dataset artifact owned by DataSynthesizer**; Arioso just consumes
+  the mels and rebuilds the same prior at inference via `synthesizePrior.quantized_prior`.
+  **Checkpoints trained on the old polyBLEP prior get a mismatched inference prior after this flip
+  and must be retrained** (the point of the change) — retrain against a freshly rebuilt
+  `prior_mel_arioso/`.
 - the **train-time clip/dataset/split layer** (`clips.py`, `dataset.py`, `splits.py`).
 - the **WaveNet->DiT model** (`model/`), the **OT-CFM loop** (`cfm.py`, `train.py`), **inference**
   (`infer.py`), and **evaluation** (`eval/`).
@@ -51,7 +55,7 @@ The data layer (spec Sections 3-5) is **~80% pre-built** by `DataSynthesizer/` +
 ## Pipeline / data flow
 
 ```
-score .mid ─ synthesizePrior.quantized_prior().render (polyBLEP saw, quantized, masked-RMS -> -20 dBFS)
+score .mid ─ synthesizePrior.quantized_prior().render (additive saw, corner ladder, masked-RMS -> -20 dBFS)
    │                                                              │
    │  (train) DataSynthesizer.build_prior: + manifest offset shift + mel ─> data/prior_mel_arioso/<base>.npy
    │                                       + aligned onset frames ────────> data/onsets_arioso/<base>.npy
@@ -108,7 +112,13 @@ score .mid ─ synthesizePrior.quantized_prior().render (polyBLEP saw, quantized
     `build_dataloader` passes `cfg.conditioning` to the dataset and binds
     `collate_fn=functools.partial(collate, specs=cfg.conditioning)` (partial stays picklable for
     future `num_workers>0`).
-- **cfm.py** — `interpolate` (OT-CFM x_t + v_target), `masked_mse`. `sigma=1e-4`.
+- **cfm.py** — `interpolate` (OT-CFM x_t + v_target), `masked_mse`. `sigma=1e-4`. Training
+  augmentations (off-path perturbation, ADR) live in **augment.py**, which imports `interpolate`
+  from here (no import back — no cycle).
+- **augment.py** — extensible training augmentations along two axes: **path transforms** (pre-forward
+  `(x_t, v_target)` transforms — `perturb_off_path` / `PathAug`) and **auxiliary losses** (need the
+  model — Anti-Drift Rectification). `build_augmentor(cfg) -> Augmentor` is the single factory
+  `train.py` calls.
   - **Off-path augmentation** (`perturb_off_path`, deferred toggle default OFF). For a
     Bernoulli(`path_aug_p`) subset of train samples, nudge `x_t` off the straight OT line by
     `std*t(1-t)*z` and re-aim the target to `v_target - std*t*z`, which preserves the endpoint
@@ -118,6 +128,12 @@ score .mid ─ synthesizePrior.quantized_prior().render (polyBLEP saw, quantized
     `path_aug_std` (noise scale; effective displacement std is `path_aug_std*t(1-t) <= std/4`). Unlike
     simply raising `sigma` (whose noise is *not* re-aimed), the re-aimed target here teaches
     restoration. `masked_mse_per_sample` backs the per-`t` eval breakdown below.
+  - **Anti-Drift Rectification** (`adr_per_sample` / ADR, deferred toggle default OFF; DEFAR,
+    arXiv 2606.28226; ADR only, no Frequency Compensation). One extra model forward on the
+    drift-simulated state `x_hat = x_t + (t1-t0)*v_t` (`t1 >= t0`, grads flow through `v_t`) whose
+    direction is penalized toward the data anchor `v_adr = x1 - (1-sigma)*x_hat` — a masked, fp32,
+    unit-vector squared error. `L = L_FM + adr_beta*L_ADR`. Two config keys: `adr_beta` (weight,
+    0 = off) and `adr_p` (per-step gate, paper-faithful 1.0). Logged as `val/adr_loss` for all runs.
 - **model/** — `timestep.py` (sinusoidal t_emb 256), `wavenet.py` (20 DiffSinger blocks, dilations
   `[1..512]x2`, gated act, skip-sum), `dit.py` (3 AdaLN-Zero **zero-init** + RoPE blocks, 6x64, FFN
   1536), `arioso.py`, `conditioning.py`.

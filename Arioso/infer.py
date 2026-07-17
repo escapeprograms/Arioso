@@ -1,7 +1,7 @@
 """Arioso inference: score -> prior -> Euler-integrated mel -> audio (Section 9).
 
 The prior is built from the input score **exactly as in training** (``DataSynthesizer.synthesizePrior``
-via ``quantized_prior``: band-limited saw + masked-RMS to the fixed target level + mel). Starting
+via ``quantized_prior``: shaped additive saw + masked-RMS to the fixed target level + mel). Starting
 from ``x = x_0`` at t=0, integrate the ODE ``x <- x + dt * v_theta(x, x_0, t, cond)`` with a
 selectable solver (``Arioso.solvers.SOLVERS``: Euler / Heun / midpoint) over ``solver_steps`` steps
 (no CFG). When the checkpoint's config has per-frame conditioning (technique by default), a
@@ -22,8 +22,7 @@ import numpy as np
 import torch
 
 from common.vocoder import load_vocoder, vocode
-from DataSynthesizer.config import (PRIOR_ANTI_ALIAS, PRIOR_ENVELOPE, PRIOR_LEVEL_MATCH,
-                                    TARGET_RMS_DBFS, TECHNIQUE_CLASSES)
+from DataSynthesizer.config import TECHNIQUE_CLASSES
 from DataSynthesizer.features import mel_for_training
 from DataSynthesizer.synthesizePrior import quantized_prior
 from DataSynthesizer.technique import expand_to_frames, note_groups_from_midi
@@ -39,8 +38,7 @@ def build_prior_mel(midi_path: str) -> np.ndarray:
     Built by the same DataSynthesizer pipeline the dataset's ``prior_mel_arioso`` was, so the
     inference prior matches training. No GT-alignment shift here: the score's onsets *are* t=0.
     """
-    synth = quantized_prior(anti_alias=PRIOR_ANTI_ALIAS, envelope=PRIOR_ENVELOPE,
-                            level_match=PRIOR_LEVEL_MATCH, target_rms_dbfs=TARGET_RMS_DBFS)
+    synth = quantized_prior()   # factory defaults ARE the PRIOR_* config knobs (one source of truth)
     return mel_for_training(synth.render(midi_path))
 
 

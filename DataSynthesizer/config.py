@@ -26,7 +26,14 @@ VOICED_TOP_DB = 40.0      # librosa.effects.split: dB below peak counted as sile
 # Components the PriorSynth factory assembles for the model's training prior. The
 # prior is masked-RMS level-matched to the SAME TARGET_RMS_DBFS the GT was scaled
 # to, so the prior/target levels agree and the match stays score-determined.
-PRIOR_ANTI_ALIAS = True          # BandlimitedSaw (polyBLEP) vs NaiveSaw
+# The additive source shapes the saw's harmonic ladder: the rounded-corner law
+# (n_c=8, p=2) cut prior->target mel RMSE 3.070 -> 2.718 by dropping the HF excess
+# the targets don't carry. "blep_saw" is the old polyBLEP baseline.
+PRIOR_SOURCE = "additive"        # "blep_saw" (old baseline) | "naive_saw" | "additive"
+PRIOR_HARMONIC_LAW = "corner"    # additive only: "alpha" (n^-alpha) | "corner" (rounded)
+PRIOR_ALPHA = 1.0                # tilt exponent; doubles as the corner law's below-corner tilt
+PRIOR_CORNER_NC = 8.0            # sweep winner n_c=8, p=2 (RMSE 2.718 vs 3.070)
+PRIOR_CORNER_P = 2.0
 PRIOR_ENVELOPE = "rect"          # "rect" HardGate (hard on/off) | "fade" anti-click ramp
 PRIOR_LEVEL_MATCH = "masked_rms" # "masked_rms" (sounding-RMS -> TARGET_RMS_DBFS) | "peak"
 
@@ -73,7 +80,8 @@ DEFAULT_OUT = "data"
 __all__ = [
     "SR", "HOP", "FADE_MS",
     "TARGET_RMS_DBFS", "VOICED_TOP_DB",
-    "PRIOR_ANTI_ALIAS", "PRIOR_ENVELOPE", "PRIOR_LEVEL_MATCH",
+    "PRIOR_SOURCE", "PRIOR_HARMONIC_LAW", "PRIOR_ALPHA", "PRIOR_CORNER_NC", "PRIOR_CORNER_P",
+    "PRIOR_ENVELOPE", "PRIOR_LEVEL_MATCH",
     "PRIOR_MEL_DIR", "ONSETS_DIR",
     "TECHNIQUE_DIR", "TECHNIQUE_CLASSES", "NO_TECHNIQUE_ID", "REST_ID",
     "TECHNIQUE_PAD_S", "TECHNIQUE_REST_SNAP_FRAMES",

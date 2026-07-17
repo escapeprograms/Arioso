@@ -3,6 +3,11 @@
 Optimal-Transport Conditional Flow Matching with a near-straight path between the prior mel
 ``x_0`` and the target mel ``x_1``. Constants: ``sigma = 1e-4``. Plain masked MSE on the
 velocity — no energy-balanced reweighting in this baseline.
+
+Training augmentations (off-path perturbation, Anti-Drift Rectification) live in
+``Arioso.augment``, which imports ``interpolate`` from here; this module must NOT import back
+(no cycle). The masked-MSE family (``masked_mse`` / ``masked_mse_per_sample`` / ``LOSSES``) stays
+here as the core objective.
 """
 
 from __future__ import annotations
@@ -21,39 +26,6 @@ def interpolate(x0: torch.Tensor, x1: torch.Tensor, t: torch.Tensor,
     x_t = (1.0 - (1.0 - sigma) * tb) * x0 + tb * x1
     v_target = x1 - (1.0 - sigma) * x0
     return x_t, v_target
-
-
-def perturb_off_path(x_t: torch.Tensor, v_target: torch.Tensor, t: torch.Tensor,
-                     p: float, std: float,
-                     generator: torch.Generator | None = None
-                     ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Off-path augmentation: perturb ``x_t`` off the OT line and re-aim the velocity target.
-
-    For a per-sample Bernoulli(``p``) subset of the batch, draw ``z ~ N(0, I)`` (per element) and::
-
-        x_tilde = x_t + std * t(1-t) * z          # nudge off the straight path
-        v_hat   = v_target - std * t * z          # re-aim so it still lands on the endpoint
-
-    The ``t(1-t)`` displacement scaling is zero at both ends and maximal mid-path (mimicking
-    solver-drift accumulation), and keeps the re-aimed target bounded — avoiding the ``/(1-t)``
-    singularity as ``t -> 1``. The endpoint is preserved exactly: ``x_tilde + (1-t)*v_hat ==
-    x_t + (1-t)*v_target`` for every element, so constant velocity from the perturbed point still
-    reaches the path endpoint at ``t=1``. This teaches the field a restoring component off the line.
-
-    ``x_t``, ``v_target``: ``[B, 128, T]``; ``t`` is per-sample ``[B]``. ``generator`` seeds BOTH the
-    ``randn`` and the Bernoulli keep-mask, so ``evaluate`` gets a deterministic metric (training
-    passes ``None``). Returns ``(x_t, v_target)`` unchanged when ``p == 0`` or ``std == 0`` (fast
-    path: no RNG draw, so a baseline run's numerics are byte-for-byte untouched).
-    """
-    if p == 0.0 or std == 0.0:
-        return x_t, v_target
-    b = x_t.shape[0]
-    tb = t.view(-1, 1, 1)                                       # [B, 1, 1]
-    z = torch.randn(x_t.shape, generator=generator, device=x_t.device, dtype=x_t.dtype)
-    keep = (torch.rand(b, generator=generator, device=x_t.device) < p).view(-1, 1, 1)
-    x_tilde = torch.where(keep, x_t + std * tb * (1.0 - tb) * z, x_t)
-    v_hat = torch.where(keep, v_target - std * tb * z, v_target)
-    return x_tilde, v_hat
 
 
 def masked_mse(v: torch.Tensor, v_target: torch.Tensor, frame_mask: torch.Tensor,

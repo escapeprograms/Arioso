@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Labeler</title>
+  <link rel="stylesheet" href="./css/app.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- ================= Transport bar ================= -->
+    <header class="transport">
+      <button id="btn-play" class="tbtn play" title="Play / Pause (space)">
+        <span class="glyph">&#9654;</span>
+      </button>
+
+      <div class="seg" id="speed-seg" role="group" aria-label="Playback speed">
+        <button data-speed="1" class="on">1&times;</button>
+        <button data-speed="0.5">0.5&times;</button>
+        <button data-speed="0.25">0.25&times;</button>
+      </div>
+
+      <div class="track-strip" id="strip-orig">
+        <button class="mute" id="orig-mute" title="Mute Original (m)">Orig</button>
+        <input type="range" id="orig-vol" min="0" max="1.5" step="0.01" value="1" title="Original volume" />
+      </div>
+      <div class="track-strip" id="strip-midi">
+        <button class="mute" id="midi-mute" title="Mute MIDI (n)">MIDI</button>
+        <input type="range" id="midi-vol" min="0" max="1.5" step="0.01" value="0.8" title="MIDI volume" />
+      </div>
+
+      <div class="seg" id="variant-toggle" role="group" aria-label="Audio variant">
+        <button data-variant="source">raw</button>
+        <button data-variant="cleaned" class="on">clean</button>
+      </div>
+
+      <div class="spacer"></div>
+
+      <!-- Selected-note inspector -->
+      <div class="inspector" id="inspector" hidden>
+        <span class="insp-pitch" id="insp-pitch">&mdash;</span>
+        <span class="insp-time"><span id="insp-start">0.000</span>&ndash;<span id="insp-end">0.000</span>s</span>
+        <label class="insp-field">vel
+          <input type="number" id="insp-vel" min="1" max="127" step="1" value="80" />
+        </label>
+        <label class="insp-field">tech
+          <select id="insp-tech"></select>
+        </label>
+        <label class="insp-field vib">vib
+          <input type="checkbox" id="insp-vib" />
+        </label>
+      </div>
+
+      <div class="save-ind" id="save-ind" title="Save state">
+        <span class="dot"></span><span class="txt">saved</span>
+      </div>
+      <div class="zoom-ind" id="zoom-ind" title="Zoom (ctrl+wheel)">200 px/s</div>
+    </header>
+
+    <!-- ================= Sidebar ================= -->
+    <aside class="sidebar">
+      <div class="sidebar-head">Clips</div>
+      <ul class="clip-list" id="clip-list"></ul>
+      <div class="sidebar-progress" id="sidebar-progress" hidden>
+        <div class="pmsg" id="pmsg">processing&hellip;</div>
+        <div class="pbar"><div class="pfill" id="pfill"></div></div>
+      </div>
+    </aside>
+
+    <!-- ================= Main stage ================= -->
+    <main class="main">
+      <div class="roll" id="roll">
+        <canvas id="ruler"></canvas>
+        <div class="pianoroll" id="pianoroll">
+          <canvas id="mel"></canvas>
+          <canvas id="notes"></canvas>
+        </div>
+        <canvas id="vel" title="Velocity lane (drag to set)"></canvas>
+        <canvas id="onset" title="Onset strength"></canvas>
+        <canvas id="overlay"></canvas>
+
+        <div class="decoding-chip" id="decoding-chip" hidden>decoding&hellip;</div>
+
+        <!-- mute-region popover -->
+        <div class="popover region-popover" id="region-popover" hidden>
+          <div class="pop-head">Mute regions <button class="pop-x" id="region-pop-close">&times;</button></div>
+          <ul id="region-list"></ul>
+          <div class="pop-hint">drag on the ruler to paint</div>
+        </div>
+      </div>
+
+      <canvas id="minimap" title="Click to jump"></canvas>
+
+      <!-- orphaned labels -->
+      <div class="orphan-panel" id="orphan-panel" hidden>
+        <button class="orphan-head" id="orphan-head">
+          <span class="chev">&#9656;</span> Orphaned labels (<span id="orphan-count">0</span>)
+        </button>
+        <div class="orphan-body" id="orphan-body" hidden></div>
+      </div>
+    </main>
+  </div>
+
+  <!-- rev-conflict modal -->
+  <div class="modal-scrim" id="rev-modal" hidden>
+    <div class="modal">
+      <h3>Save conflict</h3>
+      <p>This clip's notes were changed elsewhere (revision conflict). Reload the
+         server copy (your unsaved changes are lost) or keep editing and try again?</p>
+      <div class="modal-actions">
+        <button id="rev-reload" class="danger">Reload server copy</button>
+        <button id="rev-keep">Keep editing</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- machine-scrapable selftest sink -->
+  <div id="selftest-result" style="display:none"></div>
+
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>

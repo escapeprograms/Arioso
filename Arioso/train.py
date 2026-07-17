@@ -24,7 +24,8 @@ import torch
 
 from DataSynthesizer.config import DEFAULT_OUT
 
-from .cfm import (LOSSES, interpolate, masked_mse_per_sample, perturb_off_path)
+from .augment import adr_per_sample, build_augmentor, perturb_off_path, sample_t1
+from .cfm import (LOSSES, interpolate, masked_mse_per_sample)
 from .config import CKPT_DIR, WANDB_ENTITY, WANDB_PROJECT, AriosoConfig, cfg_to_dict
 from .dataset import build_dataloader
 from .model import AriosoModel
@@ -99,18 +100,22 @@ class EMA:
 def evaluate(model, loader, cfg, device, max_batches: int = 20) -> dict[str, float]:
     """Velocity MSE over up to ``max_batches`` val batches, on a ``T_GRID`` and off-path.
 
-    Two metrics over the same forwards:
+    Three metrics over the same forwards:
     - **on-path** ``val/velocity_mse``: the model's velocity error on the true OT interpolant.
     - **off-path** ``val/offpath_velocity_mse``: the error on a ``perturb_off_path``-nudged input
       (``p=1.0``, ``std=OFFPATH_EVAL_STD``), a fixed-seed robustness probe measuring whether the
       field restores toward the path (low error) or not.
+    - **ADR** ``val/adr_loss``: the directional drift-rectification loss (``adr_per_sample``), logged
+      for ALL runs (not gated on ``adr_beta``) so it is comparable across ADR and baseline runs —
+      one extra forward per batch, reusing the on-path ``v``. Its own fixed-seed generator (``gen_adr``,
+      independent of the off-path ``gen``) keeps the off-path probe's RNG stream untouched.
 
     Each val sample is assigned a grid ``t`` **round-robin** over ``T_GRID`` using a global sample
-    index across batches (deterministic, one on-path + one off-path forward per batch — same eval
-    cost as the old single-t metric). Per-sample errors (``masked_mse_per_sample``) are accumulated
+    index across batches (deterministic; three forwards per batch — on-path, off-path, ADR).
+    Per-sample errors (``masked_mse_per_sample``) are accumulated
     grouped by grid ``t``, so both the grid mean and the per-``t`` curves are reported. Returns a flat
-    dict: the two grid means plus ``val/velocity_mse_t/<t>`` / ``val/offpath_velocity_mse_t/<t>`` for
-    each grid point (mean over the samples that landed on that ``t``).
+    dict: the grid means plus ``val/velocity_mse_t/<t>`` / ``val/offpath_velocity_mse_t/<t>`` /
+    ``val/adr_loss_t/<t>`` for each grid point (mean over the samples that landed on that ``t``).
 
     Determinism: the off-path perturbation uses a fixed-seed ``torch.Generator``. On CUDA a generator
     must be created with ``device=device`` (a CPU generator cannot drive CUDA ``randn``), so it is
@@ -118,11 +123,14 @@ def evaluate(model, loader, cfg, device, max_batches: int = 20) -> dict[str, flo
     """
     model.eval()
     gen = torch.Generator(device=device).manual_seed(0)     # fixed-seed off-path perturbation
-    # Per-grid-t running (sum, count) of per-sample MSE, for on-path and off-path.
+    gen_adr = torch.Generator(device=device).manual_seed(1)  # independent seed for the ADR t1 draw
+    # Per-grid-t running (sum, count) of per-sample MSE, for on-path, off-path, and ADR.
     on_sum = [0.0] * len(T_GRID)
     on_cnt = [0] * len(T_GRID)
     off_sum = [0.0] * len(T_GRID)
     off_cnt = [0] * len(T_GRID)
+    adr_sum = [0.0] * len(T_GRID)
+    adr_cnt = [0] * len(T_GRID)
     sample_idx = 0                                          # global sample index -> round-robin t
     for i, batch in enumerate(loader):
         if i >= max_batches:
@@ -152,10 +160,19 @@ def evaluate(model, loader, cfg, device, max_batches: int = 20) -> dict[str, flo
         for j, g in enumerate(grid_pos):
             off_sum[g] += per_off[j].item()
             off_cnt[g] += 1
+
+        # ADR probe: drift-simulate from the on-path v and score the drifted state's direction. One
+        # extra forward at the per-sample t1 (fixed-seed gen_adr); reuses the on-path v (no re-forward
+        # at t). Logged for all runs for cross-run comparability (see docstring).
+        t1 = sample_t1(t, generator=gen_adr)
+        per_adr = adr_per_sample(model, x_t, v, x0, x1, t, t1, mask, cond, cfg.sigma)  # [B]
+        for j, g in enumerate(grid_pos):
+            adr_sum[g] += per_adr[j].item()
+            adr_cnt[g] += 1
     model.train()
 
     metrics: dict[str, float] = {}
-    on_means, off_means = [], []
+    on_means, off_means, adr_means = [], [], []
     for g, tval in enumerate(T_GRID):
         if on_cnt[g]:
             m = on_sum[g] / on_cnt[g]
@@ -165,9 +182,14 @@ def evaluate(model, loader, cfg, device, max_batches: int = 20) -> dict[str, flo
             m = off_sum[g] / off_cnt[g]
             metrics[f"val/offpath_velocity_mse_t/{tval}"] = m
             off_means.append(m)
+        if adr_cnt[g]:
+            m = adr_sum[g] / adr_cnt[g]
+            metrics[f"val/adr_loss_t/{tval}"] = m
+            adr_means.append(m)
     # Grid mean = unweighted mean over grid points (each point ~equally sampled by round-robin).
     metrics["val/velocity_mse"] = sum(on_means) / max(1, len(on_means))
     metrics["val/offpath_velocity_mse"] = sum(off_means) / max(1, len(off_means))
+    metrics["val/adr_loss"] = sum(adr_means) / max(1, len(adr_means))
     return metrics
 
 
@@ -215,6 +237,7 @@ def train(cfg: AriosoConfig, run_s: RunSettings) -> None:
 
     model = AriosoModel(cfg).to(device)
     print(f"model params: {model.num_params() / 1e6:.1f} M")
+    aug = build_augmentor(cfg)     # path transforms + ADR, resolved once (see Arioso.augment)
     ema = EMA(model, cfg.ema_max)
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     use_amp = device.startswith("cuda")
@@ -237,17 +260,26 @@ def train(cfg: AriosoConfig, run_s: RunSettings) -> None:
             cond = ({k: v.to(device) for k, v in batch["cond"].items()}
                     if "cond" in batch else None)
             t = torch.rand(x0.shape[0], device=device)          # t ~ U(0, 1) per sample
+            # Interpolate + path-aug stay OUTSIDE autocast (byte-identical to the baseline stream).
             x_t, v_target = interpolate(x0, x1, t, cfg.sigma)
-            if cfg.path_aug_p > 0.0:                             # off-path augmentation (default OFF)
-                x_t, v_target = perturb_off_path(
-                    x_t, v_target, t, cfg.path_aug_p, cfg.path_aug_std)
+            if aug.path_aug.active:                              # off-path augmentation (default OFF)
+                x_t, v_target = aug.path_aug(x_t, v_target, t)
 
             for g in opt.param_groups:
                 g["lr"] = lr_at(step, cfg)
             opt.zero_grad(set_to_none=True)
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_amp):
                 v = model(x_t, x0, t, mask, cond=cond)
-                loss = loss_fn(v, v_target, mask, batch)
+                loss_fm = loss_fn(v, v_target, mask, batch)
+                loss, l_adr = loss_fm, None
+                # ADR (default OFF): one extra forward on the drift-simulated state (grads flow
+                # through v — do NOT detach). adr_p==1.0 skips the gate RNG draw; when ADR is off no
+                # RNG is drawn at all, so the baseline stream is untouched (byte-identity).
+                if aug.adr_active and (aug.adr_p >= 1.0 or float(torch.rand(())) < aug.adr_p):
+                    t1 = sample_t1(t)
+                    l_adr = adr_per_sample(
+                        model, x_t, v, x0, x1, t, t1, mask, cond, cfg.sigma).mean()
+                    loss = loss_fm + aug.adr_beta * l_adr
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
             opt.step()
@@ -255,13 +287,21 @@ def train(cfg: AriosoConfig, run_s: RunSettings) -> None:
 
             if step % log_every == 0:
                 cur_lr = lr_at(step, cfg)
-                print(f"step {step:7d}  loss {loss.item():.5f}  lr {cur_lr:.2e}")
+                # train/loss stays the total (dashboard continuity); loss_fm / loss_adr break it out.
+                logs = {"train/loss": loss.item(), "train/loss_fm": loss_fm.item(),
+                        "train/lr": cur_lr}
+                msg = f"step {step:7d}  loss {loss.item():.5f}  fm {loss_fm.item():.5f}"
+                if l_adr is not None:
+                    logs["train/loss_adr"] = l_adr.item()
+                    msg += f"  adr {l_adr.item():.5f}"
+                print(f"{msg}  lr {cur_lr:.2e}")
                 if run:
-                    run.log({"train/loss": loss.item(), "train/lr": cur_lr}, step=step)
+                    run.log(logs, step=step)
             if val_every and step > 0 and step % val_every == 0:
                 val = evaluate(model, val_loader, cfg, device)
                 print(f"  [val] velocity MSE: {val['val/velocity_mse']:.5f}  "
-                      f"off-path: {val['val/offpath_velocity_mse']:.5f}")
+                      f"off-path: {val['val/offpath_velocity_mse']:.5f}  "
+                      f"adr: {val['val/adr_loss']:.5f}")
                 if run:
                     run.log(val, step=step)
             if ckpt_every and step > 0 and step % ckpt_every == 0:
@@ -271,7 +311,8 @@ def train(cfg: AriosoConfig, run_s: RunSettings) -> None:
     _save(ckpt_dir, model, ema, cfg, step, final=True)
     final = evaluate(model, val_loader, cfg, device)
     print(f"  [val] final velocity MSE: {final['val/velocity_mse']:.5f}  "
-          f"off-path: {final['val/offpath_velocity_mse']:.5f}")
+          f"off-path: {final['val/offpath_velocity_mse']:.5f}  "
+          f"adr: {final['val/adr_loss']:.5f}")
     if run:
         run.log(final, step=step)
         run.finish()

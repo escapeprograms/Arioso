@@ -1,0 +1,79 @@
+# Labeler configuration — partial override over the LabelerConfig dataclass
+# defaults (Labeler/config.py). Only the keys present here override code
+# defaults; unknown keys are a hard error listing the valid keys. Nested
+# sections (denoise/velocity/vibrato/export/media) map onto their param
+# dataclasses; scalars map onto top-level fields.
+
+dataset_root: Data/recorded          # root under which raw/, clips/, exports/ live
+port: 8765                           # server bind port (127.0.0.1)
+editing_enabled: true                # UI note-editing gate (also surfaced in /api/config)
+
+# Playing-technique vocabulary. name -> class; key auto-binds the 1..9 hotkey;
+# color drives the note-rect fill; abbrev is the compact UI/CSV label. The
+# order defines the per-frame class ids used by the frame-export (index = id);
+# "rest" is appended by the exporter as the final class, never listed here.
+articulations:
+  - {name: normal,    key: "1", color: "#4c72b0", abbrev: norm}
+  - {name: slur,      key: "2", color: "#dd8452", abbrev: slur}
+  - {name: spiccato,  key: "3", color: "#55a868", abbrev: spic}
+  - {name: detache,   key: "4", color: "#c44e52", abbrev: det}
+
+# Pitch-preserving playback / stretch speeds (1.0 always present).
+speeds: [1.0, 0.5, 0.25]
+
+# --- denoise stage (butter HPF -> noisereduce non-stationary -> voiced-RMS) ---
+denoise:
+  hpf_hz: 120.0                      # high-pass cutoff (Hz), sosfiltfilt
+  hpf_order: 4                       # butterworth order
+  prop_decrease: 0.85                # noisereduce noise-reduction strength
+  n_fft: 2048                        # noisereduce STFT size
+  hop_length: 512                    # noisereduce STFT hop
+  time_constant_s: 2.0               # noisereduce non-stationary time constant
+  freq_mask_smooth_hz: 500.0         # noisereduce freq-mask smoothing
+  time_mask_smooth_ms: 50.0          # noisereduce time-mask smoothing
+
+# --- transcribe stage (MUSC posteriors -> own recall-biased 'spotify' decode) -
+# Recall-biased vs. MUSC's hardcoded decoder: the dataset MIDIs were score-aligned
+# so a blind re-transcription needs low thresholds and a short min-length. The
+# vendored 127.7 ms floor deleted most short (e.g. spiccato) notes.
+transcribe:
+  onset_thresh: 0.3                  # min onset-peak activation to seed a note
+  frame_thresh: 0.2                  # min frame activation to keep a note "on"
+  min_note_len_ms: 45.0              # drop notes shorter than this (MUSC was 127.7)
+  batch_size: 32                     # model forward-pass chunk (frames per batch)
+
+# --- velocity stage (onset-strength env -> per-clip percentile -> curve) ------
+velocity:
+  pre_frames: 2                      # env window start = onset_frame - pre_frames
+  post_frames: 4                     # env window end   = onset_frame + post_frames
+  pct_low: 10.0                      # per-clip lower percentile -> 0
+  pct_high: 95.0                     # per-clip upper percentile -> 1
+  vel_floor: 24                      # velocity at x=0
+  vel_range: 96                      # velocity span (floor + range at x=1)
+  curve_gamma: 0.6                   # x -> x**gamma perceptual bend
+  degenerate_velocity: 80            # fallback when the percentile band collapses
+
+# --- vibrato stage (bend-cents band analysis) ---------------------------------
+vibrato:
+  min_dur_s: 0.3                     # notes shorter than this are never vibrato
+  middle_fraction: 0.8               # analyze the central fraction of the note
+  band_low_hz: 4.0                   # vibrato-rate band lower edge
+  band_high_hz: 9.0                  # vibrato-rate band upper edge
+  extent_min_cents: 12.0             # min peak-to-peak extent for vibrato
+  band_frac_min: 0.4                 # min fraction of (>0.5 Hz) energy inside the band
+
+# --- export stage -------------------------------------------------------------
+export:
+  gt_variant: cleaned                # which wav is the exported GT: cleaned | source
+  tempo: 120.0                       # MIDI tempo (bpm)
+  program: 40                        # MIDI program (40 = violin)
+  mute_fade_ms: 5.0                  # cosine edge (ms) when zeroing mute regions
+
+# --- media stage (mel tiles, onset env, time-stretch) -------------------------
+media:
+  tile_frames: 2048                  # mel-tile width in frames (last tile ragged)
+  mel_p_low: 1.0                     # per-clip mel percentile mapped to 0
+  mel_p_high: 99.0                   # per-clip mel percentile mapped to 1
+  onset_hop: 512                     # onset_strength hop for onset_env.f32
+  stretch_speeds: [0.5, 0.25]        # generated stretch factors
+  stretch_nfft: [2048, 4096]         # phase-vocoder n_fft parallel to stretch_speeds

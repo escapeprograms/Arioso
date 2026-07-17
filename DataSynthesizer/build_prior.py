@@ -5,12 +5,13 @@ This pass adds the two spec-faithful prior outputs the Arioso model trains on, w
 re-downloading anything:
 
 * ``data/prior_mel_arioso/<base>.npy`` — ``[N_MELS, T]`` float32 prior mel from the spec-faithful
-  prior (band-limited saw + masked-RMS level match), frame-aligned to ``target_mel`` (same ``T``).
+  prior (shaped additive saw + masked-RMS level match), frame-aligned to ``target_mel`` (same ``T``).
 * ``data/onsets_arioso/<base>.npy`` — ``[K]`` int32 aligned onset frame indices, used by the clip
   enumerator.
 
 The prior is assembled by :func:`DataSynthesizer.synthesizePrior.quantized_prior` from the
-``PRIOR_*`` config knobs (overridable per-run via the CLI flags below for ablations). It reuses the
+``PRIOR_*`` config knobs (source / harmonic-law / tilt overridable per-run via the CLI flags below
+for ablations). It reuses the
 manifest's per-clip ``offset_ms`` (estimated once at build time from the onset cross-correlation) so
 the prior lines up with the target exactly as the GT-length quantized prior did — no re-estimation.
 Resumable + skip-existing, mirroring ``DataSynthesizer.build_dataset``.
@@ -30,8 +31,9 @@ import traceback
 
 import numpy as np
 
-from .config import (DEFAULT_DATASET, DEFAULT_OUT, HOP, ONSETS_DIR, PRIOR_ANTI_ALIAS,
-                     PRIOR_ENVELOPE, PRIOR_LEVEL_MATCH, PRIOR_MEL_DIR, SR, TARGET_RMS_DBFS)
+from .config import (DEFAULT_DATASET, DEFAULT_OUT, HOP, ONSETS_DIR, PRIOR_ALPHA,
+                     PRIOR_CORNER_NC, PRIOR_CORNER_P, PRIOR_ENVELOPE, PRIOR_HARMONIC_LAW,
+                     PRIOR_LEVEL_MATCH, PRIOR_MEL_DIR, PRIOR_SOURCE, SR, TARGET_RMS_DBFS)
 from .features import mel_for_training
 from .onset_align import shift_samples
 from .synthesizePrior import note_onsets, quantized_prior
@@ -42,7 +44,9 @@ def _midi_path(dataset_root: str, book: str, basename: str) -> str:
 
 
 def process_clip(row: dict, out_dir: str, dataset_root: str, *,
-                 anti_alias: bool = PRIOR_ANTI_ALIAS, envelope: str = PRIOR_ENVELOPE,
+                 source: str = PRIOR_SOURCE, harmonic_law: str = PRIOR_HARMONIC_LAW,
+                 alpha: float = PRIOR_ALPHA, corner_nc: float = PRIOR_CORNER_NC,
+                 corner_p: float = PRIOR_CORNER_P, envelope: str = PRIOR_ENVELOPE,
                  level_match: str = PRIOR_LEVEL_MATCH,
                  target_rms_dbfs: float = TARGET_RMS_DBFS,
                  overwrite: bool = False) -> str:
@@ -64,7 +68,8 @@ def process_clip(row: dict, out_dir: str, dataset_root: str, *,
 
     # Render + level-match (on the score-aligned, unshifted prior) -> shift into GT
     # alignment. The gain is scale-invariant to the shift, so the order is safe.
-    synth = quantized_prior(anti_alias=anti_alias, envelope=envelope,
+    synth = quantized_prior(source=source, harmonic_law=harmonic_law, alpha=alpha,
+                            corner_nc=corner_nc, corner_p=corner_p, envelope=envelope,
                             level_match=level_match, target_rms_dbfs=target_rms_dbfs)
     prior = synth.render(midi, total_samples=n_samples)
     prior = shift_samples(prior, applied)
@@ -81,7 +86,9 @@ def process_clip(row: dict, out_dir: str, dataset_root: str, *,
 
 
 def build(out_dir: str = DEFAULT_OUT, dataset_root: str = DEFAULT_DATASET, *,
-          anti_alias: bool = PRIOR_ANTI_ALIAS, envelope: str = PRIOR_ENVELOPE,
+          source: str = PRIOR_SOURCE, harmonic_law: str = PRIOR_HARMONIC_LAW,
+          alpha: float = PRIOR_ALPHA, corner_nc: float = PRIOR_CORNER_NC,
+          corner_p: float = PRIOR_CORNER_P, envelope: str = PRIOR_ENVELOPE,
           level_match: str = PRIOR_LEVEL_MATCH,
           target_rms_dbfs: float = TARGET_RMS_DBFS,
           limit: int | None = None, overwrite: bool = False) -> None:
@@ -96,8 +103,9 @@ def build(out_dir: str = DEFAULT_OUT, dataset_root: str = DEFAULT_DATASET, *,
     for i, row in enumerate(rows, 1):
         base = row["basename"]
         try:
-            status = process_clip(row, out_dir, dataset_root, anti_alias=anti_alias,
-                                  envelope=envelope, level_match=level_match,
+            status = process_clip(row, out_dir, dataset_root, source=source,
+                                  harmonic_law=harmonic_law, alpha=alpha, corner_nc=corner_nc,
+                                  corner_p=corner_p, envelope=envelope, level_match=level_match,
                                   target_rms_dbfs=target_rms_dbfs, overwrite=overwrite)
             n_ok += status == "ok"
             n_skip += status == "exists"
@@ -123,14 +131,21 @@ def main() -> None:
     ap.add_argument("--overwrite", action="store_true",
                     help="re-render even if outputs already exist")
     # Prior toggles (default = spec baseline) so ablations don't need code edits.
-    ap.add_argument("--no-anti-alias", action="store_true",
-                    help="use the naive aliased sawtooth instead of polyBLEP")
+    ap.add_argument("--source", choices=("blep_saw", "naive_saw", "additive"), default=PRIOR_SOURCE,
+                    help="prior source: polyBLEP saw | naive saw | shaped additive bank")
+    ap.add_argument("--harmonic-law", choices=("alpha", "corner"), default=PRIOR_HARMONIC_LAW,
+                    help="additive only: power-law tilt vs rounded-corner ladder")
+    ap.add_argument("--alpha", type=float, default=PRIOR_ALPHA,
+                    help="tilt exponent (also the corner law's below-corner tilt)")
+    ap.add_argument("--corner-nc", type=float, default=PRIOR_CORNER_NC, help="corner harmonic n_c")
+    ap.add_argument("--corner-p", type=float, default=PRIOR_CORNER_P, help="corner order p")
     ap.add_argument("--envelope", choices=("rect", "fade"), default=PRIOR_ENVELOPE)
     ap.add_argument("--level-match", choices=("masked_rms", "peak"), default=PRIOR_LEVEL_MATCH)
     args = ap.parse_args()
 
     build(out_dir=args.out_dir, dataset_root=args.dataset_root,
-          anti_alias=not args.no_anti_alias, envelope=args.envelope,
+          source=args.source, harmonic_law=args.harmonic_law, alpha=args.alpha,
+          corner_nc=args.corner_nc, corner_p=args.corner_p, envelope=args.envelope,
           level_match=args.level_match, limit=args.limit, overwrite=args.overwrite)
 
 

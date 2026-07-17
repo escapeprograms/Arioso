@@ -15,7 +15,10 @@ still sum) and delegates each step to an injected, ``Protocol``-typed component:
   slides, intonation).
 * :class:`SourceSynth` -> a unit-amplitude waveform from an f0 curve:
   :class:`NaiveSaw` (``scipy.signal.sawtooth``) | :class:`BandlimitedSaw` (polyBLEP
-  band-limited; removes the fold-back aliasing a hard saw edge produces).
+  band-limited; removes the fold-back aliasing a hard saw edge produces) |
+  :class:`AdditiveSaw` (a summed sine bank whose per-harmonic amplitudes come from a
+  :class:`HarmonicAmps` law, so the saw's harmonic ladder can be *shaped* -- the
+  rounded-corner law softens the HF excess the flow-matching targets don't carry).
 * :class:`Envelope` -> note shaping:  :class:`HardGate` ("rect", hard on/off) |
   :class:`Fade` (short linear anti-click ramp).
 * :class:`BodyFilter` -> resonance shaping on the summed mix:  :class:`Identity`
@@ -54,7 +57,8 @@ from scipy.signal import sawtooth
 from common.audio_io import write_pcm16
 from common.config import DEFAULT_PEAK
 
-from .config import (FADE_MS, PRIOR_ANTI_ALIAS, PRIOR_ENVELOPE, PRIOR_LEVEL_MATCH,
+from .config import (FADE_MS, PRIOR_ALPHA, PRIOR_CORNER_NC, PRIOR_CORNER_P,
+                     PRIOR_ENVELOPE, PRIOR_HARMONIC_LAW, PRIOR_LEVEL_MATCH, PRIOR_SOURCE,
                      SR, TARGET_RMS_DBFS)
 
 PB_RANGE_SEMITONES = 2.0  # MIDI default pitch-wheel range (the dataset sets no RPN)
@@ -139,6 +143,16 @@ class SourceSynth(Protocol):
     def __call__(self, f0: np.ndarray, sr: int) -> np.ndarray: ...
 
 
+class HarmonicAmps(Protocol):
+    """Amplitude per 1-based harmonic index -- the shape of the harmonic ladder.
+
+    A pure function of harmonic *number* (not Hz), so the spectral shape is the same for
+    every note regardless of pitch; :class:`AdditiveSaw` samples it once per note. This is
+    the seam to widen if a Hz-aware law (e.g. a fixed body-EQ cutoff) is ever needed.
+    """
+    def __call__(self, n: np.ndarray) -> np.ndarray: ...
+
+
 class Envelope(Protocol):
     """Shape one note's waveform (anti-click / gating)."""
     def __call__(self, wav: np.ndarray, sr: int) -> np.ndarray: ...
@@ -183,6 +197,36 @@ class PitchBend:
         return 440.0 * 2.0 ** ((semis - 69.0) / 12.0)
 
 
+# --- harmonic amplitude laws ------------------------------------------------------
+
+class AlphaTilt:
+    """Power-law tilt ``a_n = n**-alpha`` (``alpha=1`` is the ideal saw's 1/n ladder).
+
+    ``alpha>1`` rolls the highs off uniformly; the tilt exponent is the single knob.
+    """
+    def __init__(self, alpha: float = PRIOR_ALPHA):
+        self.alpha = float(alpha)
+
+    def __call__(self, n: np.ndarray) -> np.ndarray:
+        return n.astype(np.float64) ** (-self.alpha)
+
+
+class RoundedCorner:
+    """Butterworth-style rounded saw ``a_n = n**-alpha_below / sqrt(1 + (n/n_c)**(2p))``.
+
+    Essentially the ``alpha_below`` tilt below the corner *harmonic* ``n_c``, then an extra
+    ``6*p`` dB/oct beyond it. Indexing the corner by harmonic number keeps the spectral shape
+    pitch-consistent. Sweep winner ``n_c=8, p=2``: prior->target mel RMSE 3.070 -> 2.718.
+    """
+    def __init__(self, n_c: float = PRIOR_CORNER_NC, p: float = PRIOR_CORNER_P,
+                 alpha_below: float = PRIOR_ALPHA):
+        self.n_c, self.p, self.alpha_below = float(n_c), float(p), float(alpha_below)
+
+    def __call__(self, n: np.ndarray) -> np.ndarray:
+        n = n.astype(np.float64)
+        return n ** (-self.alpha_below) / np.sqrt(1.0 + (n / self.n_c) ** (2.0 * self.p))
+
+
 # --- source synths ----------------------------------------------------------------
 
 class NaiveSaw:
@@ -202,6 +246,39 @@ class BandlimitedSaw:
         phase = _phase_cycles(f0, sr) % 1.0
         naive = 2.0 * phase - 1.0
         return naive - _poly_blep(phase, dt)
+
+
+class AdditiveSaw:
+    """Band-limited additive saw: ``-(2/pi) * sum_n a_n * sin(2*pi*n*phase)``.
+
+    Sums a sine bank whose per-harmonic weights come from a :class:`HarmonicAmps` law, so the
+    ladder can be *shaped* (soften the HF excess) rather than fixed at the saw's 1/n. Only the
+    ``N`` harmonics below Nyquist are summed (``N`` from the note's *highest* f0 so pitch-bend
+    trajectories stay band-limited too), so it never aliases. The ``-(2/pi)`` scale makes
+    ``AlphaTilt(1.0)`` the saw's true Fourier series at waveform level (a direct BandlimitedSaw
+    check); :class:`MaskedRMS` makes the mel scale/polarity-invariant regardless. The bank is
+    accumulated harmonic-chunk-wise in float64 (``chunk_elems`` caps ``N*n`` per matmul) so a
+    long low note never materializes the full ``[N, n]`` bank.
+    """
+    def __init__(self, amps: HarmonicAmps, nyquist_frac: float = 0.999,
+                 chunk_elems: float = 40e6):
+        self.amps = amps
+        self.nyquist_frac = float(nyquist_frac)
+        self.chunk_elems = float(chunk_elems)
+
+    def __call__(self, f0: np.ndarray, sr: int) -> np.ndarray:
+        phase = _phase_cycles(f0, sr)
+        n_samp = len(phase)
+        N = max(1, int((sr / 2 * self.nyquist_frac) // np.max(f0)))
+        harms = np.arange(1, N + 1, dtype=np.float64)
+        a = self.amps(harms)
+        out = np.zeros(n_samp, dtype=np.float64)
+        step = max(1, int(self.chunk_elems // max(1, n_samp)))
+        for h0 in range(0, N, step):
+            hs = harms[h0:h0 + step]
+            bank = np.sin(2.0 * np.pi * np.outer(hs, phase))          # [chunk, n]
+            out += a[h0:h0 + step] @ bank
+        return -(2.0 / np.pi) * out
 
 
 # --- envelopes --------------------------------------------------------------------
@@ -321,7 +398,38 @@ class PriorSynth:
 
 # --- factory + back-compat wrappers ----------------------------------------------
 
-def quantized_prior(*, anti_alias: bool = PRIOR_ANTI_ALIAS,
+def _make_harmonic_amps(law: str, *, alpha: float, corner_nc: float,
+                        corner_p: float) -> HarmonicAmps:
+    """Build the harmonic-amplitude law for :class:`AdditiveSaw` (``"alpha"`` | ``"corner"``)."""
+    if law == "alpha":
+        return AlphaTilt(alpha)
+    if law == "corner":
+        return RoundedCorner(corner_nc, corner_p, alpha)
+    raise ValueError(f"unknown harmonic_law {law!r} (expected 'alpha' or 'corner')")
+
+
+def _make_source(source: str, *, harmonic_law: str, alpha: float, corner_nc: float,
+                 corner_p: float) -> SourceSynth:
+    """Build the source synth: ``"blep_saw"`` (polyBLEP) | ``"naive_saw"`` | ``"additive"``.
+
+    Only ``"additive"`` consults the harmonic-law knobs; the two saws are fixed-shape ladders.
+    """
+    if source == "blep_saw":
+        return BandlimitedSaw()
+    if source == "naive_saw":
+        return NaiveSaw()
+    if source == "additive":
+        return AdditiveSaw(_make_harmonic_amps(
+            harmonic_law, alpha=alpha, corner_nc=corner_nc, corner_p=corner_p))
+    raise ValueError(
+        f"unknown source {source!r} (expected 'blep_saw', 'naive_saw' or 'additive')")
+
+
+def quantized_prior(*, source: str = PRIOR_SOURCE,
+                    harmonic_law: str = PRIOR_HARMONIC_LAW,
+                    alpha: float = PRIOR_ALPHA,
+                    corner_nc: float = PRIOR_CORNER_NC,
+                    corner_p: float = PRIOR_CORNER_P,
                     envelope: str = PRIOR_ENVELOPE,
                     level_match: str = PRIOR_LEVEL_MATCH,
                     target_rms_dbfs: float = TARGET_RMS_DBFS,
@@ -329,7 +437,8 @@ def quantized_prior(*, anti_alias: bool = PRIOR_ANTI_ALIAS,
     """Assemble the quantized prior pipeline (the spec baseline) from the config knobs."""
     return PriorSynth(
         pitch=Quantized(),
-        source=BandlimitedSaw() if anti_alias else NaiveSaw(),
+        source=_make_source(source, harmonic_law=harmonic_law, alpha=alpha,
+                            corner_nc=corner_nc, corner_p=corner_p),
         envelope=Fade() if envelope == "fade" else HardGate(),
         leveler=MaskedRMS(target_rms_dbfs) if level_match == "masked_rms" else Peak(),
         sr=sr,
@@ -339,7 +448,7 @@ def quantized_prior(*, anti_alias: bool = PRIOR_ANTI_ALIAS,
 def render_prior(midi_path: str, sr: int = SR,
                  total_samples: int | None = None) -> np.ndarray:
     """Quantized naive-sawtooth prior, peak-normalized (the legacy ``prior_mel_quant``)."""
-    synth = quantized_prior(anti_alias=False, envelope="fade", level_match="peak", sr=sr)
+    synth = quantized_prior(source="naive_saw", envelope="fade", level_match="peak", sr=sr)
     return synth.render(midi_path, total_samples)
 
 
