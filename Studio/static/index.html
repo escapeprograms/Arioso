@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Studio</title>
+  <link rel="stylesheet" href="./css/studio.css" />
+</head>
+<body>
+  <div class="app">
+
+    <!-- ================= Transport bar ================= -->
+    <header class="transport">
+      <div class="tgroup">
+        <button id="btn-play" class="tbtn play" title="Play / Pause (space)"><span class="glyph">&#9654;</span></button>
+        <button id="btn-stop" class="tbtn" title="Stop"><span class="glyph">&#9632;</span></button>
+        <button id="btn-loop" class="tbtn" title="Loop (L)"><span class="glyph">&#8635;</span></button>
+      </div>
+
+      <div class="lcd bpm-lcd" id="bpm-lcd" title="Tempo — drag vertically, double-click to type">
+        <span class="bpm-int" id="bpm-int">140</span><span class="bpm-frac" id="bpm-frac">.00</span>
+        <span class="lcd-label">BPM</span>
+      </div>
+
+      <div class="timesig" title="Time signature — click / right-click / wheel">
+        <span class="ts-num" id="ts-num">4</span><span class="ts-slash">/</span><span class="ts-den" id="ts-den">4</span>
+      </div>
+
+      <div class="lcd pos-lcd" title="Position (bar:beat:tick)">
+        <span class="pos-readout" id="pos-readout">1:1:00</span>
+      </div>
+
+      <div class="spacer"></div>
+
+      <label class="master" title="Master volume">
+        <span class="mvol-ico">&#128266;</span>
+        <input type="range" id="master-vol" min="0" max="1" step="0.01" value="1" />
+      </label>
+
+      <div class="save-ind" id="save-ind" data-state="saved" title="Save state">
+        <span class="dot"></span><span class="txt">saved</span>
+      </div>
+      <div class="zoom-ind" id="zoom-ind" title="Zoom (ctrl+wheel)">48 px/beat</div>
+    </header>
+
+    <!-- ================= Piano-roll toolbar ================= -->
+    <div class="toolbar" id="toolbar">
+      <div class="tool-set">
+        <button data-tool="draw"   class="toolbtn on" title="Draw (P / 1)">&#9998;</button>
+        <button data-tool="select" class="toolbtn"    title="Select (E / 2)">&#9633;</button>
+        <button data-tool="delete" class="toolbtn"    title="Delete (D / 3)">&#10005;</button>
+        <button data-tool="slice"  class="toolbtn"    title="Slice (C / 4)">&#9776;</button>
+      </div>
+
+      <div class="snap-wrap" title="Snap">
+        <span class="magnet" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6 4v7a6 6 0 0 0 12 0V4"/><line x1="4" y1="4" x2="8" y2="4"/><line x1="16" y1="4" x2="20" y2="4"/><line x1="6" y1="11" x2="18" y2="11"/>
+          </svg>
+        </span>
+        <select id="snap-select"></select>
+      </div>
+
+      <!-- Technique buttons: apply articulation to the selection (Shift+2/3/4) -->
+      <div class="tech-slots" title="Techniques — apply to selected notes">
+        <button class="techbtn" data-tech="slur"><span class="sw"></span>Slur</button>
+        <button class="techbtn" data-tech="spiccato"><span class="sw"></span>Spiccato</button>
+        <button class="techbtn" data-tech="detache"><span class="sw"></span>Detache</button>
+      </div>
+
+      <div class="tb-spacer"></div>
+
+      <!-- File group: MIDI import + WAV/MIDI export -->
+      <div class="file-group" title="Import / export">
+        <button id="btn-import" class="filebtn" title="Import a .mid file">Import</button>
+        <button id="btn-export-wav" class="filebtn" title="Export the current render as WAV">WAV</button>
+        <button id="btn-export-midi" class="filebtn" title="Export notes + bends as a .mid file">MIDI</button>
+      </div>
+      <input type="file" id="import-file" accept=".mid,.midi,audio/midi" hidden />
+
+      <!-- Render group: progress strip + source light + Render button + DEV gear -->
+      <div class="render-group">
+        <div class="render-progress" id="render-progress" hidden title="Render progress">
+          <div class="rp-bar"><div class="rp-fill" id="rp-fill"></div></div>
+          <span class="rp-stage" id="rp-stage"></span>
+        </div>
+        <button id="src-ind" class="src-ind" data-src="synth" title="Playback source">
+          <span class="dot"></span><span class="lbl">SYNTH</span>
+        </button>
+        <button id="btn-render" class="render-btn" title="Render selection / phrase (F9 / Ctrl+R)">
+          <span class="rico">&#9835;</span><span class="rlbl">Render</span>
+        </button>
+        <button id="dev-gear" class="dev-gear" title="Dev options">&#9881;</button>
+      </div>
+    </div>
+
+    <!-- ================= DEV drawer (model / prior / readouts) ================= -->
+    <div class="dev-drawer" id="dev-drawer" hidden>
+      <div class="dev-head"><span>DEV OPTIONS</span><button id="dev-close" class="dev-close" title="Close">&#10005;</button></div>
+      <label class="dev-row"><span>Model</span><select id="dev-model"></select></label>
+      <label class="dev-row"><span>Checkpoint</span><select id="dev-ckpt"></select></label>
+      <div class="dev-row"><span>Prior</span>
+        <div class="dev-toggle" id="dev-prior">
+          <button data-prior="bend" class="on">Bend</button>
+          <button data-prior="quantized">Quantized</button>
+        </div>
+      </div>
+      <div class="dev-readouts">
+        <div><span>Rendered</span><b id="dev-rendered">—</b></div>
+        <div><span>Device</span><b id="dev-device">—</b></div>
+        <div><span>Last render</span><b id="dev-last">—</b></div>
+      </div>
+    </div>
+
+    <!-- ================= Roll ================= -->
+    <div class="roll" id="roll">
+      <div class="corner"></div>
+      <canvas id="ruler"></canvas>
+
+      <canvas id="keys"></canvas>
+      <div class="gridwrap">
+        <canvas id="grid"></canvas>
+        <canvas id="overlay"></canvas>
+      </div>
+
+      <div class="lane-resize" id="lane-resize" title="Drag to resize control lane"></div>
+
+      <div class="lane-picker" id="lane-picker" title="Control lane">
+        <button data-lane="velocity" class="lanebtn on">Vel</button>
+        <button data-lane="pan" class="lanebtn">Pan</button>
+        <button data-lane="pitch" class="lanebtn">Pitch</button>
+      </div>
+      <canvas id="lane"></canvas>
+
+      <div class="wave-spacer"></div>
+      <canvas id="wave"></canvas>
+
+      <div class="mm-spacer"></div>
+      <canvas id="minimap" title="Overview"></canvas>
+    </div>
+
+    <!-- ================= Selection inspector (vibrato) ================= -->
+    <div class="inspector" id="inspector" hidden>
+      <span class="insp-title">Vibrato</span>
+      <label class="knob"><span class="k-lbl">Depth</span>
+        <input type="range" id="vib-depth" min="0" max="1.5" step="0.05" value="0" />
+        <span class="val" id="vib-depth-v">0.00 st</span></label>
+      <label class="knob"><span class="k-lbl">Rate</span>
+        <input type="range" id="vib-rate" min="3" max="9" step="0.1" value="5.5" />
+        <span class="val" id="vib-rate-v">5.5 Hz</span></label>
+      <label class="knob"><span class="k-lbl">Onset</span>
+        <input type="range" id="vib-onset" min="0" max="1" step="0.02" value="0.15" />
+        <span class="val" id="vib-onset-v">0.15 b</span></label>
+    </div>
+
+    <!-- ================= Status footer ================= -->
+    <footer class="statusbar">
+      <span id="status-msg">loading…</span>
+      <a id="export-link" class="export-link" hidden download></a>
+    </footer>
+  </div>
+
+  <!-- ================= Import-options modal ================= -->
+  <div class="modal-scrim" id="import-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="import-modal-title">
+      <div class="modal-head"><span id="import-modal-title">Import MIDI</span>
+        <button id="import-cancel-x" class="dev-close" title="Cancel">&#10005;</button></div>
+      <div class="modal-body">
+        <div class="modal-file" id="import-filename">no file selected</div>
+        <div class="modal-row"><span>Mode</span>
+          <div class="dev-toggle" id="import-mode">
+            <button data-mode="replace" class="on">Replace</button>
+            <button data-mode="merge">Merge</button>
+          </div>
+        </div>
+        <label class="modal-check"><input type="checkbox" id="import-adopt-bpm" /> Adopt file BPM</label>
+        <label class="modal-check"><input type="checkbox" id="import-snap" /> Snap to current grid on import</label>
+      </div>
+      <div class="modal-foot">
+        <button id="import-cancel" class="filebtn">Cancel</button>
+        <button id="import-go" class="render-btn"><span class="rlbl">Import</span></button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>

@@ -4,7 +4,7 @@
 # sections (denoise/velocity/vibrato/export/media) map onto their param
 # dataclasses; scalars map onto top-level fields.
 
-dataset_root: Data/recorded          # root under which raw/, clips/, exports/ live
+dataset_root: Data/gt_arky          # root under which raw/, clips/, exports/ live
 port: 8765                           # server bind port (127.0.0.1)
 editing_enabled: true                # UI note-editing gate (also surfaced in /api/config)
 

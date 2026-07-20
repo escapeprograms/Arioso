@@ -131,9 +131,11 @@ each step to an injected, `Protocol`-typed component — swap any axis without a
   target) | `Peak` (legacy peak-normalize to `DEFAULT_PEAK`). The level match is a component, not
   baked into render. The mel front-end is **not** in the pipeline — callers mel after any alignment shift.
 - `quantized_prior(source=, harmonic_law=, alpha=, corner_nc=, corner_p=, envelope=, level_match=,
-  target_rms_dbfs=, sr=)` — factory that assembles the spec-baseline quantized pipeline from the
-  `PRIOR_*` config knobs (defaults = the additive rounded-corner prior); `_make_source` /
-  `_make_harmonic_amps` are the private assembly seams (unknown name → `ValueError`).
+  target_rms_dbfs=, pitch=, sr=)` — factory that assembles the spec-baseline quantized pipeline from
+  the `PRIOR_*` config knobs (defaults = the additive rounded-corner prior); `pitch="quantized"`
+  (default, byte-identical training/inference prior) or `"bend"` selects the `PitchBend` trajectory
+  (Studio bend-mode renders); `_make_pitch` / `_make_source` / `_make_harmonic_amps` are the private
+  assembly seams (unknown name → `ValueError`).
 - `render_prior(midi_path, sr=44100, total_samples=None)` / `render_prior_bend(...)` — thin wrappers
   for the legacy **peak-normalized** quantized / pitch-bend priors (used by `build_dataset`).
   `total_samples` defaults to the MIDI end time; pass the GT length to force exact pair alignment.

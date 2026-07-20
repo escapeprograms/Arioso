@@ -1,0 +1,29 @@
+# Studio configuration — partial override over the StudioConfig dataclass
+# defaults (Studio/config.py). Only the keys present here override code
+# defaults; unknown keys are a hard error listing the valid keys. The nested
+# `cache` section maps onto the CacheParams dataclass; scalars map onto
+# top-level fields.
+
+projects_root: Data/studio_projects   # root that /media mounts over; per-project dirs live here
+port: 8766                            # server bind port (127.0.0.1); distinct from Labeler's 8765
+models_root: Arioso/models            # scanned by /api/models for <run>/*.pt checkpoints
+
+# Render defaults surfaced to the dev-options drawer.
+default_model: 7-9-adr                # run flagged default in /api/models
+default_checkpoint: checkpoint_final.pt
+default_prior_mode: bend              # bend | quantized (quantized ignores per-note bends/vibrato)
+
+# Playing-technique vocabulary. name -> class; key auto-binds the 1..9 hotkey;
+# color fills the note rect (normal = FL default green); abbrev is the compact
+# label; model_vocab is the stub mapping onto a future conditioned model's
+# technique vocab (unused while checkpoints are unconditioned).
+articulations:
+  - {name: normal,   key: "1", color: "#6cc04a", abbrev: norm, model_vocab: normal}
+  - {name: slur,     key: "2", color: "#dd8452", abbrev: slur, model_vocab: normal}
+  - {name: spiccato, key: "3", color: "#4c9be8", abbrev: spic, model_vocab: spiccato}
+  - {name: detache,  key: "4", color: "#c46bd0", abbrev: det,  model_vocab: normal}
+
+# --- segment cache (render/cache phase) ---------------------------------------
+cache:
+  gap_s: 0.35                         # min inter-note gap that splits a cache segment
+  pad_s: 0.1                          # silence padding baked around each segment

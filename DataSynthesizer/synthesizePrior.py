@@ -408,6 +408,21 @@ def _make_harmonic_amps(law: str, *, alpha: float, corner_nc: float,
     raise ValueError(f"unknown harmonic_law {law!r} (expected 'alpha' or 'corner')")
 
 
+def _make_pitch(pitch: str) -> PitchTrajectory:
+    """Build the pitch trajectory: ``"quantized"`` (constant MIDI pitch) | ``"bend"``.
+
+    ``"bend"`` follows the per-instrument pitch-wheel (:class:`PitchBend`), baking
+    vibrato/slides/intonation into the prior; ``"quantized"`` (the baseline) ignores
+    bends. Kept as a factory seam so the Studio renderer can flip modes without
+    changing the quantized default that training/inference rely on.
+    """
+    if pitch == "quantized":
+        return Quantized()
+    if pitch == "bend":
+        return PitchBend()
+    raise ValueError(f"unknown pitch {pitch!r} (expected 'quantized' or 'bend')")
+
+
 def _make_source(source: str, *, harmonic_law: str, alpha: float, corner_nc: float,
                  corner_p: float) -> SourceSynth:
     """Build the source synth: ``"blep_saw"`` (polyBLEP) | ``"naive_saw"`` | ``"additive"``.
@@ -433,10 +448,17 @@ def quantized_prior(*, source: str = PRIOR_SOURCE,
                     envelope: str = PRIOR_ENVELOPE,
                     level_match: str = PRIOR_LEVEL_MATCH,
                     target_rms_dbfs: float = TARGET_RMS_DBFS,
+                    pitch: str = "quantized",
                     sr: int = SR) -> PriorSynth:
-    """Assemble the quantized prior pipeline (the spec baseline) from the config knobs."""
+    """Assemble the quantized prior pipeline (the spec baseline) from the config knobs.
+
+    ``pitch`` selects the pitch trajectory: ``"quantized"`` (constant MIDI pitch, the
+    default — keeps training/inference priors byte-identical) or ``"bend"``
+    (:class:`PitchBend`, following the per-instrument pitch-wheel so vibrato/slides are
+    baked into the prior; used by the Studio renderer's bend mode).
+    """
     return PriorSynth(
-        pitch=Quantized(),
+        pitch=_make_pitch(pitch),
         source=_make_source(source, harmonic_law=harmonic_law, alpha=alpha,
                             corner_nc=corner_nc, corner_p=corner_p),
         envelope=Fade() if envelope == "fade" else HardGate(),
