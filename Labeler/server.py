@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .api import router
 from .config import LabelerConfig, load_config
-from .library import clips_root
+from .library import clips_root, reconcile_interrupted
 from .processing import JobManager
 
 _STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -46,6 +46,13 @@ def create_app(cfg: LabelerConfig | None = None) -> FastAPI:
     app = FastAPI(title="Labeler", version="1.0")
     app.state.cfg = cfg
     app.state.jobs = JobManager(cfg)
+    # Nothing is running yet, so it is safe to clear crash-wedged "processing"
+    # statuses (e.g. a transcribe that hard-locked the machine) back to a
+    # re-runnable error, rather than leaving a permanent UI spinner.
+    interrupted = reconcile_interrupted(cfg)
+    if interrupted:
+        print(f"[labeler] reset {len(interrupted)} interrupted clip(s) to error: "
+              + ", ".join(interrupted))
     app.include_router(router)
 
     croot = clips_root(cfg)

@@ -40,7 +40,13 @@ transcribe:
   onset_thresh: 0.3                  # min onset-peak activation to seed a note
   frame_thresh: 0.2                  # min frame activation to keep a note "on"
   min_note_len_ms: 45.0              # drop notes shorter than this (MUSC was 127.7)
-  batch_size: 32                     # model forward-pass chunk (frames per batch)
+  batch_size: 8                      # ~3s MUSC windows per GPU forward pass; low keeps
+                                     # the VRAM peak well under an 8 GB card (was 32,
+                                     # which sat at the edge and could hard-lock)
+  use_subprocess: true               # run the GPU pass in a fresh process so all VRAM +
+                                     # fragmentation is reclaimed on exit and an OOM is
+                                     # caught instead of freezing the server
+  subprocess_timeout_s: 900          # kill + record a soft-wedged transcribe child
 
 # --- velocity stage (onset-strength env -> per-clip percentile -> curve) ------
 velocity:

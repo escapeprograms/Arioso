@@ -81,13 +81,24 @@ class TranscribeParams:
     MUSC's hardcoded 'spotify' decoder. The dataset MIDIs were score-aligned, so a
     blind re-transcription of a recording needs recall-biased thresholds and a
     short minimum note length — the vendored 127.7 ms floor deleted most short
-    (e.g. spiccato) notes. ``batch_size`` is the model forward-pass chunk size,
-    consolidated here (previously hardcoded in the transcribe stage).
+    (e.g. spiccato) notes. ``batch_size`` is the number of ~3 s MUSC windows run on
+    the GPU per forward pass — the direct VRAM lever (kept low so the peak stays
+    well under an 8 GB card; the whole clip is still transcribed, just in more,
+    smaller batches).
+
+    ``use_subprocess`` runs the GPU forward pass in a fresh ``transcribe_worker``
+    process so all VRAM (and its fragmentation) is reclaimed by the OS on exit and
+    a GPU OOM becomes a catchable child failure instead of hanging the server; it
+    is a pure-execution knob (does not change the transcription output).
+    ``subprocess_timeout_s`` kills a soft-wedged child. Both execution knobs are
+    excluded from the transcribe stage hash (see ``stage_params_hash``).
     """
     onset_thresh: float = 0.3
     frame_thresh: float = 0.2
     min_note_len_ms: float = 45.0
-    batch_size: int = 32
+    batch_size: int = 8
+    use_subprocess: bool = True
+    subprocess_timeout_s: float = 900.0
 
 
 @dataclass(frozen=True)
@@ -141,6 +152,12 @@ _STAGE_PARAMS = {
     "finalize": ("articulations",),
 }
 
+# Fields that live on a param group but only affect *execution*, not the stage's
+# output — excluded from the stage hash so toggling them never forces a rerun.
+_HASH_EXCLUDE = {
+    "transcribe": ("use_subprocess", "subprocess_timeout_s"),
+}
+
 
 @dataclass
 class LabelerConfig:
@@ -156,6 +173,10 @@ class LabelerConfig:
     vibrato: VibratoParams = field(default_factory=VibratoParams)
     export: ExportParams = field(default_factory=ExportParams)
     media: MediaParams = field(default_factory=MediaParams)
+    # Resolved path of the YAML this config was loaded from (None => code defaults).
+    # Set by load_config; the transcribe subprocess re-loads it so the child sees the
+    # exact same config. Not a tunable — kept out of repr/equality/hashing.
+    config_path: str | None = field(default=None, compare=False, repr=False)
 
     # -- derived helpers --
     @property
@@ -189,7 +210,10 @@ class LabelerConfig:
             if key == "articulations":
                 payload[key] = self.vocabulary_snapshot()
             else:
-                payload[key] = dataclasses.asdict(getattr(self, key))
+                group = dataclasses.asdict(getattr(self, key))
+                for drop in _HASH_EXCLUDE.get(stage, ()):  # execution-only knobs
+                    group.pop(drop, None)
+                payload[key] = group
         blob = json.dumps(payload, sort_keys=True, default=str)
         return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:12]
 
@@ -295,7 +319,7 @@ def load_config(yaml_path: str | None = None) -> LabelerConfig:
             kw[key] = _apply_group(type(getattr(base, key)), getattr(base, key),
                                    doc[key], f"{yaml_path}:{key}")
 
-    cfg = dataclasses.replace(base, **kw)
+    cfg = dataclasses.replace(base, config_path=os.path.abspath(yaml_path), **kw)
     # Sanity: stretch_speeds and stretch_nfft must be parallel.
     if len(cfg.media.stretch_speeds) != len(cfg.media.stretch_nfft):
         raise ValueError(

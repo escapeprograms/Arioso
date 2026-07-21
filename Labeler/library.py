@@ -241,3 +241,35 @@ def default_status(clip_id: str, raw_path: str | None) -> dict:
         "error": None,
         "stages": {},                 # stage -> {state, hash}
     }
+
+
+def reconcile_interrupted(cfg: LabelerConfig) -> list[str]:
+    """Reset clips wedged at ``state="processing"`` on disk back to an error.
+
+    A hard crash (or a kill) during a stage — most likely the GPU transcribe — can
+    take the process down without hitting the per-stage ``except`` that records an
+    error, leaving ``status.json`` frozen at ``state="processing"``. The UI then
+    shows a permanent spinner with no way to retry. Called once at server startup
+    (before any job can run), this rewrites each such status to a re-runnable
+    ``error`` while **preserving the per-stage skip cache** (the ``stages`` map), so
+    the next process re-runs only the interrupted stage onward. Returns the ids reset.
+    """
+    reset: list[str] = []
+    croot = clips_root(cfg)
+    if not os.path.isdir(croot):
+        return reset
+    for cid in sorted(os.listdir(croot)):
+        sp = os.path.join(croot, cid, STATUS_JSON)
+        status = read_json(sp)
+        if not isinstance(status, dict) or status.get("state") != "processing":
+            continue
+        status["state"] = "error"
+        status["message"] = "interrupted"
+        status["error"] = {
+            "code": "interrupted",
+            "detail": "processing was interrupted (crash or restart); press process to retry",
+            "stage": status.get("stage"),
+        }
+        atomic_write_json(sp, status)
+        reset.append(cid)
+    return reset

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 import threading
 import traceback
@@ -33,6 +34,7 @@ from common.config import HOP_SIZE as HOP, SR
 from . import media as media_mod
 from . import notes_store
 from . import transcribe as transcribe_mod
+from . import transcribe_worker
 from .align import estimate_midi_offset, shift_note_times
 from .config import LabelerConfig, MODEL_FPS, STAGES, load_config
 from .denoise import denoise
@@ -40,7 +42,6 @@ from .library import (AUTO_JSON, CLEANED_WAV, MEL_DIR, MEL_META, MUSC_RAW_MID,
                       NOTES_JSON, ONSET_ENV, SOURCE_WAV, STATUS_JSON, STRETCH_DIR,
                       TRANSCRIPTION_JSON, atomic_write_json, clip_dir, clip_file,
                       clip_id_for_path, default_status, find_raw_wav, read_json)
-from .midi_io import write_midi
 from .velocity import compute_velocities
 from .vibrato import detect_vibrato
 
@@ -57,6 +58,19 @@ _DEPS = {
 }
 
 NOTES_MODES = ("keep_labels", "retranscribe_merge", "reset_notes")
+
+# Repo root (Labeler/..) — the cwd the transcribe subprocess needs so
+# ``python -m Labeler.transcribe_worker`` resolves.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _tail(text, n: int = 20) -> str:
+    """Last ``n`` lines of a subprocess stderr (str/bytes/None-safe)."""
+    if not text:
+        return "(no stderr)"
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+    return "\n".join(text.splitlines()[-n:])
 
 
 class Pipeline:
@@ -160,21 +174,48 @@ class Pipeline:
         write_pcm16(self._p(CLEANED_WAV), cleaned, SR)
 
     def _stage_transcribe(self) -> None:
-        y = load_mono(self._p(CLEANED_WAV), sr=SR)
+        if self.cfg.transcribe.use_subprocess:
+            self._transcribe_subprocess()
+        else:
+            # In-process fallback: same shared core, but the parent holds the lock.
+            with transcribe_mod.GPU_LOCK:
+                transcribe_worker.run_transcribe(
+                    self._p(CLEANED_WAV), self._p(TRANSCRIPTION_JSON),
+                    self._p(MUSC_RAW_MID), self.cfg.transcribe)
+
+    def _transcribe_subprocess(self) -> None:
+        """Run the MUSC forward pass in a fresh process (VRAM reclaimed on exit).
+
+        A GPU OOM/crash then kills only the child; a non-zero exit or a timeout is
+        raised as a ``RuntimeError`` that :meth:`run`'s per-stage handler records as
+        ``state=error`` — instead of an uncatchable server freeze. ``GPU_LOCK`` still
+        serializes transcription across clips. NOTE: a true OS-level driver hard-lock
+        freezes this parent too, so the timeout only rescues a *soft*-wedged child.
+        """
+        cfg_path = getattr(self.cfg, "config_path", None)
+        cmd = [sys.executable, "-m", "Labeler.transcribe_worker", self.clip_id]
+        if cfg_path:
+            cmd += ["--config", cfg_path]
+        # expandable_segments defragments the CUDA allocator (the accumulation that
+        # tipped an 8 GB card into a driver-hanging spill); full env copy so Windows
+        # keeps PATH / SYSTEMROOT / CUDA DLL dirs.
+        env = dict(os.environ, PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True")
+        timeout = float(self.cfg.transcribe.subprocess_timeout_s)
         with transcribe_mod.GPU_LOCK:
-            result = transcribe_mod.transcribe_notes(y, self.cfg.transcribe)
-        tj = {
-            "model_fps": result.model_fps,
-            "sr": result.sr,
-            "notes": [{"start_s": n.start_s, "end_s": n.end_s, "pitch": n.pitch,
-                       "amplitude": n.amplitude, "bend_cents": n.bend_cents}
-                      for n in result.notes],
-        }
-        atomic_write_json(self._p(TRANSCRIPTION_JSON), tj)
-        raw_notes = [{"start_s": n.start_s, "end_s": n.end_s, "pitch": n.pitch,
-                      "velocity": max(1, int(round(127 * n.amplitude)))}
-                     for n in result.notes]
-        write_midi(self._p(MUSC_RAW_MID), raw_notes)
+            try:
+                proc = subprocess.run(cmd, cwd=_PROJECT_ROOT, env=env, check=True,
+                                      timeout=timeout, capture_output=True, text=True)
+            except subprocess.TimeoutExpired as e:
+                raise RuntimeError(
+                    f"transcribe worker timed out after {timeout:.0f}s "
+                    f"(GPU likely wedged); stderr tail:\n{_tail(e.stderr)}") from e
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(
+                    f"transcribe worker exited {e.returncode}; stderr tail:\n"
+                    f"{_tail(e.stderr)}") from e
+        for line in (proc.stdout or "").splitlines():  # surface peak-VRAM readout
+            if line.strip():
+                print(line)
 
     def _stage_align(self) -> None:
         tj = self._load_transcription()
