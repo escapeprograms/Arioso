@@ -37,6 +37,24 @@ from .library import projects_root
 _STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 
+class RevalidatedStaticFiles(StaticFiles):
+    """StaticFiles that forces browser revalidation (``Cache-Control: no-cache``).
+
+    Starlette's StaticFiles sends ETag/Last-Modified but no Cache-Control, so
+    browsers apply *heuristic freshness* (~10% of the file's age) and serve
+    stale copies without ever revalidating — a re-rendered ``render/mix.wav``
+    (same URL every render) kept playing the old audio for hours, and stale
+    ``/static`` JS modules survived normal page reloads. ``no-cache`` means
+    "store, but revalidate every request": unchanged files are still cheap 304s,
+    changed files are picked up immediately.
+    """
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 def _fix_windows_mimes() -> None:
     """Register the MIME types Windows gets wrong (breaks ES modules / CSS)."""
     mimetypes.add_type("application/javascript", ".js")
@@ -55,12 +73,13 @@ def create_app(cfg: StudioConfig | None = None) -> FastAPI:
     proot = projects_root(cfg)
     os.makedirs(proot, exist_ok=True)
     # Range/206 support is free via StaticFiles' FileResponse.
-    app.mount("/media", StaticFiles(directory=proot), name="media")
+    app.mount("/media", RevalidatedStaticFiles(directory=proot), name="media")
 
     # The frontend is owned by a separate agent and may not exist yet; only mount
     # it when the directory is present so the API still boots on its own.
     if os.path.isdir(_STATIC_DIR):
-        app.mount("/static", StaticFiles(directory=_STATIC_DIR, html=True), name="static")
+        app.mount("/static", RevalidatedStaticFiles(directory=_STATIC_DIR, html=True),
+                  name="static")
 
     @app.get("/")
     def index():

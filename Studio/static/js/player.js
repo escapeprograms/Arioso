@@ -44,7 +44,9 @@ export const player = {
   // ---------- rendered-audio buffer ----------
   async loadRenderWav(url){
     if (!ctx) this.init();
-    const resp = await fetch(url);
+    // no-store: mix.wav lives at a fixed URL and changes every render — never
+    // let the browser's HTTP cache answer for it.
+    const resp = await fetch(url, { cache: 'no-store' });
     if (!resp.ok) throw new Error('wav fetch ' + resp.status);
     const arr = await resp.arrayBuffer();
     renderBuffer = await ctx.decodeAudioData(arr);

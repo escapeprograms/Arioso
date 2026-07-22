@@ -39,8 +39,9 @@ export function parse(buf){
 }
 
 // Fetch + parse a .peaks URL; installs it as the active envelope. Returns the parsed obj.
+// no-store: mix.peaks lives at a fixed URL and changes every render.
 export async function load(url){
-  const resp = await fetch(url);
+  const resp = await fetch(url, { cache: 'no-store' });
   if (!resp.ok) throw new Error('peaks fetch ' + resp.status);
   peaks = parse(await resp.arrayBuffer());
   return peaks;
