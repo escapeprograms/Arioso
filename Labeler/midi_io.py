@@ -1,10 +1,10 @@
-"""Notes <-> MIDI: write a pretty_midi score the DataSynthesizer pipeline consumes.
+"""Notes <-> MIDI: write a pretty_midi score the common.prior pipeline consumes.
 
 Two roles:
   * write ``musc_raw.mid`` (the pre-alignment flatten of the raw transcription)
     that :mod:`Labeler.align` renders the offset-estimation prior from, and
-  * write the export MIDI that ``DataSynthesizer.synthesizePrior.quantized_prior``
-    / ``note_onsets`` / ``technique.note_groups_from_midi`` read back.
+  * write the export MIDI that ``common.prior.quantized_prior`` / ``note_onsets``
+    / ``common.dataset_schema.note_groups_from_midi`` read back.
 
 The score is deliberately plain — tempo 120, a single ``Instrument(program=40)``
 "violin", integer velocities, **no pitch bends** — because the quantized prior and
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import pretty_midi
 
-from .config import ExportParams
+from .config import CompileParams
 
 
 def notes_to_pretty_midi(notes: list[dict], tempo: float = 120.0,
@@ -56,7 +56,7 @@ def write_midi(path: str, notes: list[dict], tempo: float = 120.0,
     return path
 
 
-def write_export_midi(path: str, notes: list[dict], params: ExportParams) -> str:
+def write_export_midi(path: str, notes: list[dict], params: CompileParams) -> str:
     return write_midi(path, notes, tempo=params.tempo, program=params.program)
 
 

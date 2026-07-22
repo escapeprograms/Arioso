@@ -45,17 +45,15 @@ export function moveNote(id, dStart, dPitch, opts = {}){
   };
 }
 
-// --- resize (drag edge) ---
-export function resizeNote(id, edge, dSec){
+// --- resize (drag right edge) ---
+export function resizeNote(id, dSec){
   const n = noteById(id);
   const o = { start: n.start_s, end: n.end_s, timing: n.human.timing };
-  let ns = o.start, ne = o.end;
-  if (edge === 'start') ns = Math.min(o.start + dSec, o.end - MIN_DUR);
-  else                  ne = Math.max(o.end + dSec, o.start + MIN_DUR);
+  const ne = Math.max(o.end + dSec, o.start + MIN_DUR);
   return {
     label: 'resize', selAfter: id,
-    mutate(){ const m = noteById(id); m.start_s = ns; m.end_s = ne; m.human.timing = true; },
-    invert(){ const m = noteById(id); m.start_s = o.start; m.end_s = o.end; m.human.timing = o.timing; },
+    mutate(){ const m = noteById(id); m.end_s = ne; m.human.timing = true; },
+    invert(){ const m = noteById(id); m.end_s = o.end; m.human.timing = o.timing; },
   };
 }
 
@@ -101,6 +99,17 @@ export function splitNote(id, t){
     mutate(doc){ const m = noteById(id); m.end_s = t; m.human.timing = true; doc.notes.push(right); },
     invert(doc){ const m = noteById(id); m.end_s = oldEnd; m.human.timing = oldTiming;
                  const i = doc.notes.findIndex(x => x.id === rightId); if (i >= 0) doc.notes.splice(i, 1); },
+  };
+}
+
+// --- split every note containing time t (one undo step) ---
+export function splitAllAt(t){
+  const cmds = store.doc.notes.map(n => splitNote(n.id, t)).filter(Boolean);
+  if (!cmds.length) return null;
+  return {
+    label: 'split', selAfter: store.selectedId, phAfter: t,
+    mutate(doc){ for (const c of cmds) c.mutate(doc); },
+    invert(doc){ for (let i = cmds.length - 1; i >= 0; i--) cmds[i].invert(doc); },
   };
 }
 

@@ -6,8 +6,7 @@ would share one wheel and their bends would collide, so before MIDI export the
 notes are split into **voices**: each voice is a monophonic stream (no two notes
 overlap in time) and becomes its own ``pretty_midi.Instrument`` with its own
 unambiguous bend curve. :mod:`Studio.midi_export` sums the voices back into
-polyphony exactly as :class:`DataSynthesizer.synthesizePrior.PriorSynth` sums
-across instrument tracks.
+polyphony exactly as :class:`common.prior.PriorSynth` sums across instrument tracks.
 
 The partition is a classic greedy interval-graph coloring: sort by start, drop
 each note into the first voice whose last note has already ended, else open a new

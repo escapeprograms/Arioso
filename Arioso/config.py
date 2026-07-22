@@ -4,19 +4,21 @@ One frozen dataclass (``AriosoConfig``) so a run is fully described by one objec
 ablations are a one-field change. The **mel contract** is *not* redefined here — it is
 imported from ``common.config`` (the project's single source of truth, asserted against
 the BigVGAN checkpoint at vocoder-load time). The **prior** is a dataset artifact built
-by ``DataSynthesizer.build_prior``; its knobs (anti-alias, envelope, level match, RMS
-target) live in ``DataSynthesizer.config`` (the single source of truth shared with the
-GT loudness normalization). Only Arioso-specific model/training knobs live here.
+by ``DataSynthesizer.build_prior``; its shape knobs (anti-alias, envelope, level match,
+RMS target) live in ``common.prior`` (shared with Arioso inference and the Studio
+renderer). Only Arioso-specific model/training knobs live here.
 
 Defaults are the **spec baseline** (``SPEC_Arioso_v1_baseline.md``); every deferred or
 out-of-scope feature is a toggle that defaults OFF so the baseline is the default run.
 
-**Per-frame conditioning** (``CondSpec`` + ``AriosoConfig.conditioning``) is part of the spec
-baseline: violin-technique conditioning (``TECHNIQUE_COND``) is default **ON**. The unconditioned
-ablation is ``AriosoConfig(conditioning=())``. Classifier-free-guidance dropout (``cond_dropout``)
-is a deferred toggle and defaults **OFF**. Checkpoints embed the config via ``cfg_to_dict`` /
-``cfg_from_dict`` (plain dicts only, so ``torch.load(weights_only=True)`` under torch 2.6 stays
-safe, and pre-conditioning checkpoints reconstruct the exact old architecture).
+**Per-frame conditioning** (``CondSpec`` + ``AriosoConfig.conditioning``): the three standard
+signals — articulation, velocity, vibrato — are each optional per dataset root and resolved from
+the ``SIGNALS`` registry. ``AriosoConfig.conditioning`` defaults to ``()`` (the main synthetic
+corpus carries no labels); a labelled root opts in via ``conditioning: [articulation, velocity,
+vibrato]``. Classifier-free-guidance dropout (``cond_dropout``) is a deferred toggle and defaults
+**OFF**. Checkpoints embed the config via ``cfg_to_dict`` / ``cfg_from_dict`` (plain dicts only, so
+``torch.load(weights_only=True)`` under torch 2.6 stays safe, and pre-conditioning checkpoints
+reconstruct the exact old architecture).
 """
 
 from __future__ import annotations
@@ -25,11 +27,16 @@ import dataclasses
 from dataclasses import dataclass
 
 from common.config import HOP_SIZE, N_MELS, SR
-# Prior-build output layout is owned by DataSynthesizer (it writes these dirs); re-export
-# so Arioso readers (clips, dataset, eval) keep a single ``from .config import ...`` line.
-# TECHNIQUE_DIR/TECHNIQUE_CLASSES/REST_ID back the default technique conditioning signal.
-from DataSynthesizer.config import (ONSETS_DIR, PRIOR_MEL_DIR, REST_ID, TECHNIQUE_CLASSES,
-                                    TECHNIQUE_DIR)
+from common.dataset_schema import (DIR_ONSETS, DIR_PRIOR_MEL, SIGNAL_NUM_CLASSES,
+                                   SIGNAL_REST_ID, SPLIT_JSON, cond_dir)
+
+# The standard prior/onsets dir names, re-exported under the historical constant names so
+# Arioso readers (clips, dataset, eval) keep a single ``from .config import ...`` line. The
+# values come from common.dataset_schema ("prior_mel" / "onsets") — the on-disk names every
+# standard root uses (the synthetic root was migrated from the old "prior_mel_arioso" /
+# "onsets_arioso" by DataSynthesizer.migrate_root).
+PRIOR_MEL_DIR = DIR_PRIOR_MEL
+ONSETS_DIR = DIR_ONSETS
 
 # Frames per second of the mel grid (~86.13 at SR=44100, hop=512).
 FRAME_RATE = SR / HOP_SIZE
@@ -47,15 +54,30 @@ class CondSpec:
     pad_id: int = 0   # id for batch padding (padded frames are masked by frame_mask anyway)
 
 
-# The default (baseline-ON) conditioning signal: per-frame violin technique. Its id tracks are
-# built by DataSynthesizer.build_techniques into data/technique_arioso/; padded frames use REST.
-TECHNIQUE_COND = CondSpec("technique", num_classes=len(TECHNIQUE_CLASSES), emb_dim=64,
-                          dir=TECHNIQUE_DIR, pad_id=REST_ID)
+# The three standard conditioning signals, each optional per root. Their id tracks live under
+# ``cond/<signal>/`` on a standard dataset root; class counts / rest (pad) ids are DERIVED from
+# common.dataset_schema so the on-disk encoding and the embedding tables can never drift. Padded
+# frames use each signal's rest id (masked by frame_mask anyway). The main synthetic corpus carries
+# none of these (AriosoConfig.conditioning defaults to () — the unconditioned baseline); a labelled
+# root (e.g. gt_arky) opts in via ``conditioning: [articulation, velocity, vibrato]``.
+ARTICULATION_COND = CondSpec("articulation", num_classes=SIGNAL_NUM_CLASSES["articulation"],
+                             emb_dim=64, dir=cond_dir("articulation"),
+                             pad_id=SIGNAL_REST_ID["articulation"])
+VELOCITY_COND = CondSpec("velocity", num_classes=SIGNAL_NUM_CLASSES["velocity"],
+                         emb_dim=64, dir=cond_dir("velocity"),
+                         pad_id=SIGNAL_REST_ID["velocity"])
+VIBRATO_COND = CondSpec("vibrato", num_classes=SIGNAL_NUM_CLASSES["vibrato"],
+                        emb_dim=16, dir=cond_dir("vibrato"),
+                        pad_id=SIGNAL_REST_ID["vibrato"])
 
 # Conditioning-signal registry: name -> the canonical CondSpec for that signal. A YAML run-config
-# names a signal (e.g. ``conditioning: [technique]``) and the loader resolves it here, so adding a
-# new signal is one CondSpec constant + one entry (mirrors the SOLVERS/SCHEDULES registry pattern).
-SIGNALS: dict[str, CondSpec] = {"technique": TECHNIQUE_COND}
+# names a signal (e.g. ``conditioning: [articulation]``) and the loader resolves it here, so adding
+# a new signal is one CondSpec constant + one entry (mirrors the SOLVERS/SCHEDULES registry pattern).
+SIGNALS: dict[str, CondSpec] = {
+    "articulation": ARTICULATION_COND,
+    "velocity": VELOCITY_COND,
+    "vibrato": VIBRATO_COND,
+}
 
 
 @dataclass(frozen=True)
@@ -68,7 +90,7 @@ class AriosoConfig:
     n_mels: int = N_MELS
 
     # The prior (Section 4) is a dataset artifact built by DataSynthesizer.build_prior;
-    # its knobs live in DataSynthesizer.config, not here.
+    # its shape knobs live in common.prior, not here.
 
     # --- Model architecture (Section 6) ------------------------------------------
     hidden: int = 384
@@ -86,8 +108,9 @@ class AriosoConfig:
     dit_ffn: int = 1536
     rope_base: float = 10000.0
     # Per-frame conditioning: one CondSpec per categorical signal, embedded and concatenated to
-    # [x_t, x_0] before in_proj. Default ON (technique); the ablation is ``conditioning=()``.
-    conditioning: tuple[CondSpec, ...] = (TECHNIQUE_COND,)
+    # [x_t, x_0] before in_proj. Defaults to () — the main synthetic corpus carries no labels; a
+    # labelled root opts in via ``conditioning: [articulation, velocity, vibrato]``.
+    conditioning: tuple[CondSpec, ...] = ()
     # CFG lever (deferred, OFF): fraction of samples whose ENTIRE conditioning is swapped for the
     # per-spec "unknown" id (row num_classes) during training. See model.conditioning.
     cond_dropout: float = 0.0
@@ -209,11 +232,11 @@ def cfg_from_dict(d: dict) -> AriosoConfig:
 
 
 # --- Output layout ---------------------------------------------------------------
-# Training *data* (prior mels, onset frames, split) lives under the DataSynthesizer `data/`
-# root; model *artifacts* (checkpoints, listening samples) live under the Arioso package.
-# PRIOR_MEL_DIR / ONSETS_DIR are re-exported from DataSynthesizer.config (above), which
-# owns the prior build and writes those dirs.
-SPLIT_FILE = "arioso_split.json"     # held-out-piece split (train/val basenames) (in data/)
+# Training *data* (prior mels, onset frames, split) lives under a standard dataset root;
+# model *artifacts* (checkpoints, listening samples) live under the Arioso package.
+# PRIOR_MEL_DIR / ONSETS_DIR are re-exported from common.dataset_schema (above); the split
+# file name is the standard SPLIT_JSON ("split.json", written by Arioso.splits per root).
+SPLIT_FILE = SPLIT_JSON              # held-out-piece split (train/val basenames), in the root
 CKPT_DIR = "Arioso/models"           # raw + EMA checkpoints (project-relative, gitignored)
 SAMPLES_DIR = "Arioso/samples"       # listening artifacts (copy-synthesis, inference wavs)
 

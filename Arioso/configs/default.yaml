@@ -33,9 +33,10 @@ model:
   rope_base: 10000.0           # RoPE base frequency (float)
 
   # --- Per-frame conditioning ---
-  # A list of signals: a registered name (string), a registered name as a mapping with overrides,
-  # or a novel inline mapping (needs name/num_classes/emb_dim/dir). [] -> unconditioned ablation.
-  conditioning: [technique]
+  # A list of signals: a registered name (string: articulation | velocity | vibrato), a registered
+  # name as a mapping with overrides, or a novel inline mapping (needs name/num_classes/emb_dim/dir).
+  # [] -> unconditioned ablation (the code default: the main synthetic corpus carries no labels).
+  conditioning: []
   cond_dropout: 0.0            # CFG dropout fraction (deferred toggle, OFF)
 
   # --- OT-CFM objective ---
@@ -70,7 +71,7 @@ model:
 
 # run: -> RunSettings fields (runtime/env knobs; NEVER embedded in checkpoints).
 run:
-  out_dir: data             # data root holding prior/target mels + the split
+  data_roots: [Data]        # ordered dataset roots holding prior/target mels + per-root split.json
   batch_size: 8
   steps: null               # total-steps cap; null -> model.total_steps
   log_every: 50

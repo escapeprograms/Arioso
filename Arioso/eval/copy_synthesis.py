@@ -9,42 +9,41 @@ the mel contract matches the checkpoint.
 from __future__ import annotations
 
 import argparse
-import csv
 import os
 
 import numpy as np
 import torch
 
 from common.audio_io import load_mono, write_pcm16
+from common.dataset_schema import DatasetRoot
 from common.vocoder import load_vocoder, mel_spectrogram, vocode
-from DataSynthesizer.config import DEFAULT_OUT
 
 from ..config import SAMPLES_DIR, AriosoConfig
 from ..splits import make_split
 
 
-def _first_val_gt(out_dir: str) -> str:
+def _first_val_gt(root: DatasetRoot) -> str:
     """Path to a held-out (val) GT wav, so the sanity is on a piece the model never sees."""
-    split = make_split(out_dir)
-    val = set(split["val"])
-    with open(os.path.join(out_dir, "manifest.csv"), newline="", encoding="utf-8") as f:
-        for r in csv.DictReader(f):
-            if r.get("status") == "ok" and r["basename"] in val:
-                return r["gt_path"]
+    split = make_split(root)
+    for base in split["val"]:
+        path = root.gt_path(base)
+        if os.path.isfile(path):
+            return path
     raise RuntimeError("no held-out GT clip found (run build_prior / splits first)")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out-dir", default=DEFAULT_OUT)
+    ap.add_argument("--data-root", default="Data",
+                    help="dataset root (eval is single-root)")
     ap.add_argument("--input", help="GT wav (default: first held-out clip)")
     ap.add_argument("--out", default=os.path.join(SAMPLES_DIR, "copysynth.wav"))
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
 
     cfg = AriosoConfig()
-    gt_path = args.input or _first_val_gt(args.out_dir)
+    gt_path = args.input or _first_val_gt(DatasetRoot(args.data_root))
     print(f"copy-synthesis on: {gt_path}")
 
     y = load_mono(gt_path)

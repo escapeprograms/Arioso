@@ -16,7 +16,7 @@ Two design decisions worth stating up front:
   WAV is position-independent and gets placed at the right absolute offset only at
   stitch time. Bend/vibrato are already note-relative, so they need no adjustment.
 
-* **No per-segment renormalization.** :class:`DataSynthesizer.synthesizePrior.MaskedRMS`
+* **No per-segment renormalization.** :class:`common.prior.MaskedRMS`
   already normalizes each rendered segment's prior to the same ``-20`` dBFS voiced
   level, and the model + vocoder roughly preserve that level, so per-segment levels
   are already consistent. Stitching therefore sums the segments as-is and applies

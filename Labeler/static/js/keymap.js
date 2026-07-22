@@ -35,8 +35,8 @@ export function dispatch(e){
     case 'v': case 'V': actions.toggleVibrato(); return true;
     case 'ArrowLeft': actions.selectPrev(); return true;
     case 'ArrowRight': actions.selectNext(); return true;
-    case 'ArrowUp': actions.velUp(); return true;
-    case 'ArrowDown': actions.velDown(); return true;
+    case 'ArrowUp': shift ? actions.velUp() : actions.pitchUp(); return true;
+    case 'ArrowDown': shift ? actions.velDown() : actions.pitchDown(); return true;
     case '[': actions.speedDown(); return true;
     case ']': actions.speedUp(); return true;
     case 'm': case 'M': actions.toggleMuteOrig(); return true;
@@ -44,6 +44,7 @@ export function dispatch(e){
     case 'f': case 'F': actions.toggleFollow(); return true;
     case 's': case 'S': actions.save(); return true;
     case 'x': case 'X': actions.splitAtPlayhead(); return true;
+    case 'c': case 'C': actions.splitAllAtPlayhead(); return true;
     case 'g': case 'G': actions.togglePaintRegion(); return true;
     case 'Delete': case 'Backspace': actions.deleteSelected(); return true;
     case 'Escape': actions.deselect(); return true;

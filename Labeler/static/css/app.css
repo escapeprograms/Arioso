@@ -69,6 +69,15 @@ input[type=range]{ width:74px; accent-color:var(--accent); }
 .insp-field select{ background:var(--bg); border:1px solid var(--line2); border-radius:4px; padding:2px 4px; }
 .insp-field.vib input{ accent-color:var(--accent2); }
 
+.verified-toggle{
+  display:flex; align-items:center; gap:5px; padding:4px 9px;
+  background:var(--bg3); border:1px solid var(--line2); border-radius:6px; color:var(--fg-dim);
+}
+.verified-toggle .glyph{ opacity:.5; }
+.verified-toggle:hover{ border-color:var(--ok); color:var(--fg); }
+.verified-toggle.on{ background:#173a2b; border-color:var(--ok); color:var(--ok); }
+.verified-toggle.on .glyph{ opacity:1; }
+
 .save-ind{ display:flex; align-items:center; gap:5px; color:var(--fg-dim); min-width:64px; }
 .save-ind .dot{ width:8px; height:8px; border-radius:50%; background:var(--ok); }
 .save-ind[data-state=saving] .dot{ background:var(--busy); animation:pulse 1s infinite; }
@@ -97,8 +106,18 @@ input[type=range]{ width:74px; accent-color:var(--accent); }
 .badge.error{ background:#3a2326; color:var(--err); }
 .clip-sub{ display:flex; align-items:center; gap:6px; color:var(--fg-mute); font-size:10px; }
 .clip-edits{ color:var(--accent2); }
+.badge.verified{ background:#173a2b; color:var(--ok); }
+.clip-verified{ color:var(--ok); }
 .pbtn{ background:var(--bg3); border:1px solid var(--line2); border-radius:5px; padding:2px 7px; color:var(--fg-dim); }
 .pbtn:hover{ border-color:var(--accent); color:var(--fg); }
+.sidebar-compile{ padding:8px 10px; border-top:1px solid var(--line); }
+.compile-btn{
+  width:100%; background:var(--bg3); border:1px solid var(--line2); border-radius:6px;
+  padding:6px 8px; color:var(--fg-dim);
+}
+.compile-btn:hover:not(:disabled){ border-color:var(--accent); color:var(--fg); }
+.compile-btn:disabled{ opacity:.55; cursor:default; }
+.compile-status{ margin-top:6px; color:var(--fg-mute); font-size:10px; font-variant-numeric:tabular-nums; }
 .sidebar-progress{ padding:8px 10px; border-top:1px solid var(--line); }
 .pmsg{ color:var(--fg-dim); margin-bottom:5px; }
 .pbar{ height:6px; background:var(--bg3); border-radius:3px; overflow:hidden; }

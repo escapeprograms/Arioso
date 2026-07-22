@@ -10,8 +10,7 @@ is tempo-invariant; seconds exist only at the audio/MIDI boundary.
 
 ## Quickstart
 
-Run **from the project root** (so `import common` / `import Arioso` / `import DataSynthesizer`
-resolve):
+Run **from the project root** (so `import common` / `import Arioso` resolve):
 
 ```bash
 PY="C:/Users/archi/miniconda3/envs/ai-violin/python.exe"
@@ -35,8 +34,8 @@ A phased build (see the plan), now complete and integration-verified end to end 
 technique/velocity/pan/bend/vibrato → real GPU render on `7-9-adr/checkpoint_final.pt` →
 fetch `mix.wav`/`mix.peaks` over `/media` → export WAV/MIDI → import `.mid`). **Phase 0 =
 backend skeleton** (config, library, project store, timing, `JobManager`, API). **Phase 3 =
-render backend** (`voices`/`bend`/`midi_export`/`peaks`/`model_registry`/`render` + the
-`quantized_prior(pitch=)` kwarg in `DataSynthesizer/synthesizePrior.py`). **Phase 5 =
+render backend** (`voices`/`bend`/`midi_export`/`peaks`/`model_registry`/`render`, rendering the
+prior via `common.prior.quantized_prior(pitch=)`). **Phase 5 =
 segment caching** (`cache.py` + segment-aware `render.py`): the document is split into
 silence-delimited segments, each rendered once to `render/cache/seg_<hash>.wav` and reused
 on later renders whose content did not change, then stitched into `mix.wav` (editing one
@@ -184,7 +183,7 @@ render thread would race those saves and bump the rev. Meta is a separate server
   flat notes (no events). `pitch_bend_events(note, start_s, dur_s, bpm, next_start_s=None)`:
   piecewise-linear `bend` control points (beats rel note start) + ramped vibrato
   (`depth·sin(2π rate t)`, linear fade-in over ~2 cycles from `onset_beats`), sampled at
-  **200 Hz**, clamped to ±2 st (`PB_RANGE_SEMITONES`), converted to wheel ints
+  **200 Hz**, clamped to ±2 st (`PB_RANGE_SEMITONES`, imported from `common.prior`), converted to wheel ints
   (`semis/range·8192`, clamp ±8191), plus a `PitchBend(0)` **reset** in the trailing gap
   (≤50 ms past the end / gap-midpoint; suppressed when legato). **Torch-free** (numpy).
 - **`midi_export.py`** — `project_to_pretty_midi(doc, note_ids=None, prior_mode="bend")`:
@@ -206,8 +205,9 @@ render thread would race those saves and bump the rev. Meta is a separate server
   prior_mode, device, progress)`: **segment-aware**. `plan_render` (torch-free) segments +
   hashes the doc and detects cache hits, then only the non-cached segments run the five-stage
   pipeline (`_render_segments`, module-level so it can be monkeypatched out in tests):
-  per-segment `write_midi` (notes time-shifted so the padded lead = t 0) → `quantized_prior(
-  pitch=bend|quantized)` + `mel_for_training(synth.render(total_samples=span))` →
+  per-segment `write_midi` (notes time-shifted so the padded lead = t 0) →
+  `common.prior.quantized_prior(pitch=bend|quantized)` +
+  `common.vocoder.mel_frames(synth.render(total_samples=span))` →
   `generate_mel(cond_frames=None)` → `vocode` → `write_pcm16(cache/seg_<hash>.wav)`. Then
   `cache.stitch` places every segment (cached + fresh) into `mix.wav`, `write_peaks(mix.peaks)`,
   `prune_cache`, and writes `render/meta.json` with the segment manifest. Module-level

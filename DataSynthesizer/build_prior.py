@@ -4,13 +4,14 @@ The DataSynthesizer ``data/`` tree already has GT audio, ``target_mel`` and a ``
 This pass adds the two spec-faithful prior outputs the Arioso model trains on, without
 re-downloading anything:
 
-* ``data/prior_mel_arioso/<base>.npy`` — ``[N_MELS, T]`` float32 prior mel from the spec-faithful
+* ``<out>/prior_mel/<base>.npy`` — ``[N_MELS, T]`` float32 prior mel from the spec-faithful
   prior (shaped additive saw + masked-RMS level match), frame-aligned to ``target_mel`` (same ``T``).
-* ``data/onsets_arioso/<base>.npy`` — ``[K]`` int32 aligned onset frame indices, used by the clip
+* ``<out>/onsets/<base>.npy`` — ``[K]`` int32 aligned onset frame indices, used by the clip
   enumerator.
 
-The prior is assembled by :func:`DataSynthesizer.synthesizePrior.quantized_prior` from the
-``PRIOR_*`` config knobs (source / harmonic-law / tilt overridable per-run via the CLI flags below
+The dir names come from the standard layout (``common.dataset_schema.DIR_PRIOR_MEL`` /
+``DIR_ONSETS``). The prior is assembled by :func:`common.prior.quantized_prior` from the
+``PRIOR_*`` knobs (source / harmonic-law / tilt overridable per-run via the CLI flags below
 for ablations). It reuses the
 manifest's per-clip ``offset_ms`` (estimated once at build time from the onset cross-correlation) so
 the prior lines up with the target exactly as the GT-length quantized prior did — no re-estimation.
@@ -31,12 +32,15 @@ import traceback
 
 import numpy as np
 
-from .config import (DEFAULT_DATASET, DEFAULT_OUT, HOP, ONSETS_DIR, PRIOR_ALPHA,
-                     PRIOR_CORNER_NC, PRIOR_CORNER_P, PRIOR_ENVELOPE, PRIOR_HARMONIC_LAW,
-                     PRIOR_LEVEL_MATCH, PRIOR_MEL_DIR, PRIOR_SOURCE, SR, TARGET_RMS_DBFS)
-from .features import mel_for_training
-from .onset_align import shift_samples
-from .synthesizePrior import note_onsets, quantized_prior
+from common.config import TARGET_RMS_DBFS
+from common.dataset_schema import DIR_ONSETS, DIR_PRIOR_MEL
+from common.onset_align import shift_samples
+from common.prior import (PRIOR_ALPHA, PRIOR_CORNER_NC, PRIOR_CORNER_P, PRIOR_ENVELOPE,
+                          PRIOR_HARMONIC_LAW, PRIOR_LEVEL_MATCH, PRIOR_SOURCE,
+                          note_onsets, quantized_prior)
+from common.vocoder import mel_frames
+
+from .config import DEFAULT_DATASET, DEFAULT_OUT, HOP, SR
 
 
 def _midi_path(dataset_root: str, book: str, basename: str) -> str:
@@ -52,8 +56,8 @@ def process_clip(row: dict, out_dir: str, dataset_root: str, *,
                  overwrite: bool = False) -> str:
     """Build prior mel + onset frames for one manifest row. Returns a status string."""
     base = row["basename"]
-    prior_dir = os.path.join(out_dir, PRIOR_MEL_DIR)
-    onset_dir = os.path.join(out_dir, ONSETS_DIR)
+    prior_dir = os.path.join(out_dir, DIR_PRIOR_MEL)
+    onset_dir = os.path.join(out_dir, DIR_ONSETS)
     os.makedirs(prior_dir, exist_ok=True)
     os.makedirs(onset_dir, exist_ok=True)
     prior_mel_path = os.path.join(prior_dir, base + ".npy")
@@ -74,7 +78,7 @@ def process_clip(row: dict, out_dir: str, dataset_root: str, *,
     prior = synth.render(midi, total_samples=n_samples)
     prior = shift_samples(prior, applied)
 
-    prior_mel = mel_for_training(prior)
+    prior_mel = mel_frames(prior)
     np.save(prior_mel_path, prior_mel)
 
     n_frames = prior_mel.shape[-1]
@@ -116,7 +120,7 @@ def build(out_dir: str = DEFAULT_OUT, dataset_root: str = DEFAULT_DATASET, *,
             traceback.print_exc(limit=1)
 
     print(f"\nDone: {n_ok} built, {n_skip} existed, {n_fail} failed -> "
-          f"{os.path.join(out_dir, PRIOR_MEL_DIR)}")
+          f"{os.path.join(out_dir, DIR_PRIOR_MEL)}")
 
 
 def main() -> None:

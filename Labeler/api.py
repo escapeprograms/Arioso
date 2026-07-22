@@ -1,7 +1,7 @@
-"""FastAPI routes (thin) — JSON over the clip library, pipeline, and export.
+"""FastAPI routes (thin) — JSON over the clip library and pipeline.
 
 Handlers stay thin: they validate, delegate to ``library`` / ``processing`` /
-``notes_store`` / ``export``, and shape the JSON. Errors are always
+``notes_store``, and shape the JSON. Errors are always
 ``JSONResponse({"error": code, "detail": ...})`` with the documented status:
 404 (unknown clip / not-yet-processed), 409 ``job_running`` (mutate while a job
 runs) or ``rev_conflict`` (stale PUT, carries ``server_rev``), 400 (bad request).
@@ -18,10 +18,9 @@ from fastapi.responses import JSONResponse
 
 from common.config import HOP_SIZE as HOP, SR
 
-from . import export as export_mod
 from . import notes_store
 from .config import STAGES
-from .library import (ClipNotFound, MEL_DIR, MEL_META, clip_dir, clip_file,
+from .library import (MEL_DIR, MEL_META, clip_dir,
                       find_raw_wav, get_clip_info, read_json, scan_clips)
 from .media import stretch_name
 from .processing import NOTES_MODES
@@ -74,7 +73,7 @@ def list_clips(request: Request):
         state = "processing" if jobs.is_running(info.id) else info.state
         out.append({"id": info.id, "name": info.name, "duration_s": info.duration_s,
                     "state": state, "has_notes": info.has_notes,
-                    "human_edits": info.human_edits})
+                    "human_edits": info.human_edits, "verified": info.verified})
     return out
 
 
@@ -209,30 +208,44 @@ async def post_notes(clip_id: str, request: Request):
     return await _put_notes(clip_id, request)
 
 
-# --- export -----------------------------------------------------------------
+# --- verified flag ----------------------------------------------------------
 
-@router.post("/api/clips/{clip_id}/export")
-async def export_clip(clip_id: str, request: Request):
+@router.post("/api/clips/{clip_id}/verified")
+async def set_verified(clip_id: str, request: Request):
+    """Toggle a clip's human sign-off (gates compile). 409 while a job runs on it."""
     cfg = _cfg(request)
     jobs = _jobs(request)
     if not _clip_exists(cfg, clip_id):
         return _err(404, "clip_not_found", clip_id)
     if jobs.is_running(clip_id):
-        return _err(409, "job_running", f"a job is running for {clip_id}")
+        return _err(409, "job_running", f"a job is running for {clip_id}; try again after it finishes")
     try:
         body = await request.json()
     except Exception:
-        body = {}
-    body = body or {}
-    gt_variant = body.get("gt_variant")
-    include_frames = bool(body.get("include_frames", True))
-    if gt_variant is not None and gt_variant not in ("cleaned", "source"):
-        return _err(400, "bad_request", "gt_variant must be 'cleaned' or 'source'")
-    try:
-        res = export_mod.export_clip(cfg, clip_id, gt_variant=gt_variant,
-                                     include_frames=include_frames)
-    except ClipNotFound as e:
-        return _err(404, "clip_not_found", str(e))
-    except ValueError as e:
-        return _err(400, "export_error", str(e))
-    return res
+        return _err(400, "bad_request", 'body must be {"verified": true|false}')
+    if not isinstance(body, dict) or not isinstance(body.get("verified"), bool):
+        return _err(400, "bad_request", 'body must be {"verified": true|false}')
+    doc = notes_store.set_verified(cfg, clip_id, body["verified"])
+    if doc is None:
+        return _err(404, "no_notes", f"{clip_id} has no notes.json to verify yet")
+    return {"status": "ok", "rev": doc["rev"], "verified": doc.get("verified", False)}
+
+
+# --- compile (gt_arky -> standard dataset root) -----------------------------
+
+def _compiler(request: Request):
+    return request.app.state.compiler
+
+
+@router.post("/api/compile")
+def start_compile(request: Request):
+    """Start a background compile of all verified clips; 409 if one already runs."""
+    if not _compiler(request).start():
+        return _err(409, "compile_running", "a compile is already running")
+    return JSONResponse({"status": "accepted"}, status_code=202)
+
+
+@router.get("/api/compile/status")
+def compile_status(request: Request):
+    """``{running, done, skipped, failed, current, total, root}`` for the last/active run."""
+    return _compiler(request).status()

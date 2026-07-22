@@ -68,10 +68,12 @@ vibrato:
   extent_min_cents: 12.0             # min peak-to-peak extent for vibrato
   band_frac_min: 0.4                 # min fraction of (>0.5 Hz) energy inside the band
 
-# --- export stage -------------------------------------------------------------
-export:
-  gt_variant: cleaned                # which wav is the exported GT: cleaned | source
-  tempo: 120.0                       # MIDI tempo (bpm)
+# --- compile step (gt_arky -> standard dataset root; python -m Labeler.compile) -
+compile:
+  root: Data/datasets/gt_arky        # standard-layout output root (manifest + gt/ etc.)
+  gt_variant: source                 # which wav becomes the GT: cleaned | source
+                                     # (source = raw tone; cleaned's denoise hurts timbre)
+  tempo: 120.0                       # MIDI tempo (bpm) for the in-memory prior score
   program: 40                        # MIDI program (40 = violin)
   mute_fade_ms: 5.0                  # cosine edge (ms) when zeroing mute regions
 

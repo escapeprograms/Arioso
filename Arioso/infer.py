@@ -1,16 +1,16 @@
 """Arioso inference: score -> prior -> Euler-integrated mel -> audio (Section 9).
 
-The prior is built from the input score **exactly as in training** (``DataSynthesizer.synthesizePrior``
-via ``quantized_prior``: shaped additive saw + masked-RMS to the fixed target level + mel). Starting
+The prior is built from the input score **exactly as in training** (``common.prior`` via
+``quantized_prior``: shaped additive saw + masked-RMS to the fixed target level + mel). Starting
 from ``x = x_0`` at t=0, integrate the ODE ``x <- x + dt * v_theta(x, x_0, t, cond)`` with a
 selectable solver (``Arioso.solvers.SOLVERS``: Euler / Heun / midpoint) over ``solver_steps`` steps
-(no CFG). When the checkpoint's config has per-frame conditioning (technique by default), a
-``[T]`` id track is built from the SAME score (``build_technique_frames``: ``--technique`` on every
-note, rest in the gaps) and passed as fixed conditioning through the whole integration. The
-architecture is reconstructed from the checkpoint's embedded config (``cfg_from_dict``), so
-pre-conditioning checkpoints load unchanged. Long sequences are processed in overlapping chunks
-with a linear crossfade. The mel is turned to audio with the **frozen** BigVGAN-v2 vocoder
-(listening only — never a selection arbiter).
+(no CFG). When the checkpoint's config has per-frame conditioning, a ``[T]`` id track per signal is
+built from the SAME score (``build_cond_frames``: a constant ``--articulation`` over note groups, a
+constant ``--vibrato`` flag over note spans, and velocity rasterized from the MIDI's own velocities)
+and passed as fixed conditioning through the whole integration. The architecture is reconstructed
+from the checkpoint's embedded config (``cfg_from_dict``), so pre-conditioning checkpoints load
+unchanged. Long sequences are processed in overlapping chunks with a linear crossfade. The mel is
+turned to audio with the **frozen** BigVGAN-v2 vocoder (listening only — never a selection arbiter).
 """
 
 from __future__ import annotations
@@ -21,11 +21,11 @@ import os
 import numpy as np
 import torch
 
-from common.vocoder import load_vocoder, vocode
-from DataSynthesizer.config import TECHNIQUE_CLASSES
-from DataSynthesizer.features import mel_for_training
-from DataSynthesizer.synthesizePrior import quantized_prior
-from DataSynthesizer.technique import expand_to_frames, note_groups_from_midi
+from common.dataset_schema import (ARTIC_REST_ID, ARTICULATIONS, NoteEvent,
+                                   expand_to_frames, note_groups_from_midi,
+                                   rasterize_velocity, rasterize_vibrato)
+from common.prior import quantized_prior
+from common.vocoder import load_vocoder, mel_frames, vocode
 
 from .config import SAMPLES_DIR, AriosoConfig, cfg_from_dict
 from .model import AriosoModel
@@ -35,24 +35,52 @@ from .solvers import SOLVERS
 def build_prior_mel(midi_path: str) -> np.ndarray:
     """Score -> prior mel ``[N_MELS, T]``, identical to the training-time prior (Section 9.1).
 
-    Built by the same DataSynthesizer pipeline the dataset's ``prior_mel_arioso`` was, so the
-    inference prior matches training. No GT-alignment shift here: the score's onsets *are* t=0.
+    Built by the same ``common.prior`` pipeline the dataset's ``prior_mel`` was, so the inference
+    prior matches training. No GT-alignment shift here: the score's onsets *are* t=0.
     """
-    synth = quantized_prior()   # factory defaults ARE the PRIOR_* config knobs (one source of truth)
-    return mel_for_training(synth.render(midi_path))
+    synth = quantized_prior()   # factory defaults ARE the PRIOR_* knobs (one source of truth)
+    return mel_frames(synth.render(midi_path))
 
 
-def build_technique_frames(midi_path: str, n_frames: int, technique: str = "normal") -> np.ndarray:
-    """``[T]`` uint8 technique-id track for a score at inference time.
+def _note_events(midi_path: str, *, vibrato: bool = False) -> list[NoteEvent]:
+    """All score notes as :class:`NoteEvent`\\ s (real MIDI velocities; a constant vibrato flag)."""
+    import pretty_midi
 
-    Every note is assigned the requested ``technique``; gaps / lead-in / tail become ``rest``.
-    Built from the SAME note grouping as the dataset labels (``note_groups_from_midi`` with
-    ``offset_s=0.0`` — matching ``build_prior_mel``'s no-shift convention, since the score's
-    onsets are t=0) so the id grid lines up frame-for-frame with the prior mel.
+    pm = pretty_midi.PrettyMIDI(midi_path)
+    return [NoteEvent(start_s=note.start, end_s=note.end, pitch=note.pitch,
+                      velocity=note.velocity, vibrato=vibrato)
+            for inst in pm.instruments for note in inst.notes]
+
+
+def build_cond_frames(midi_path: str, n_frames: int, spec_name: str,
+                      args: argparse.Namespace) -> np.ndarray:
+    """``[T]`` uint8 conditioning-id track for one signal at inference time.
+
+    All tracks are built from the SAME score (``offset_s=0.0`` — the score's onsets are t=0, matching
+    ``build_prior_mel``'s no-shift convention) so the id grid lines up frame-for-frame with the prior
+    mel. Per the standard encodings:
+
+    * ``articulation`` — the constant ``args.articulation`` id assigned to every note group
+      (``note_groups_from_midi`` + ``expand_to_frames``); gaps / lead-in / tail become rest.
+    * ``velocity`` — the MIDI's own per-note velocities span-filled (rest = 0).
+    * ``vibrato`` — the constant ``args.vibrato`` flag span-filled over note spans (rest = 2).
+
+    An unknown signal (e.g. the deprecated ``"technique"`` classifier signal) is a
+    ``NotImplementedError``.
     """
-    groups = note_groups_from_midi(midi_path, offset_s=0.0, n_frames=n_frames)
-    tech_ids = np.full(len(groups), TECHNIQUE_CLASSES.index(technique), dtype=np.uint8)
-    return expand_to_frames(groups, tech_ids, n_frames)
+    if spec_name == "articulation":
+        groups = note_groups_from_midi(midi_path, offset_s=0.0, n_frames=n_frames)
+        artic_id = ARTICULATIONS.index(args.articulation)
+        ids = np.full(len(groups), artic_id, dtype=np.uint8)
+        return expand_to_frames(groups, ids, n_frames, rest_id=ARTIC_REST_ID)
+    if spec_name == "velocity":
+        return rasterize_velocity(_note_events(midi_path), n_frames)
+    if spec_name == "vibrato":
+        return rasterize_vibrato(_note_events(midi_path, vibrato=args.vibrato), n_frames)
+    raise NotImplementedError(
+        f"no inference-time builder for conditioning signal {spec_name!r}; 'technique' is a "
+        "deprecated signal (its classifier was removed) — retrain with the "
+        "articulation/velocity/vibrato signals instead")
 
 
 @torch.no_grad()
@@ -139,10 +167,12 @@ def main() -> None:
                     help="integration method (default: config's 'euler')")
     ap.add_argument("--steps", type=int, default=None,
                     help="solver steps; NFE = steps * nfe_per_step (default: config's 24)")
-    ap.add_argument("--technique", choices=TECHNIQUE_CLASSES[:5], default="normal",
-                    help="technique conditioning applied to EVERY note ('rest' auto-fills gaps); "
-                         "per-note control is a future extension (only used if the checkpoint's "
-                         "config has technique conditioning)")
+    ap.add_argument("--articulation", choices=ARTICULATIONS, default="normal",
+                    help="articulation conditioning applied to EVERY note (rest auto-fills gaps); "
+                         "only used if the checkpoint's config has articulation conditioning")
+    ap.add_argument("--vibrato", action=argparse.BooleanOptionalAction, default=False,
+                    help="vibrato conditioning applied to EVERY note span (--vibrato / --no-vibrato); "
+                         "only used if the checkpoint's config has vibrato conditioning")
     ap.add_argument("--save-mel", help="optional .npy path for the generated mel")
     args = ap.parse_args()
 
@@ -160,12 +190,8 @@ def main() -> None:
     # Assemble per-frame conditioning id tracks for whatever signals this checkpoint expects.
     cond_frames = {}
     for spec in cfg.conditioning:
-        if spec.name == "technique":
-            cond_frames[spec.name] = build_technique_frames(
-                args.midi, prior_mel.shape[-1], args.technique)
-        else:
-            raise NotImplementedError(
-                f"no inference-time builder for conditioning signal {spec.name!r}")
+        cond_frames[spec.name] = build_cond_frames(
+            args.midi, prior_mel.shape[-1], spec.name, args)
         # Both derive from the same MIDI render, but fail loud if they ever disagree.
         assert cond_frames[spec.name].shape[-1] == prior_mel.shape[-1], (
             f"conditioning track {spec.name!r} length {cond_frames[spec.name].shape[-1]} != "

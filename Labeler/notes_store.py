@@ -108,6 +108,10 @@ def build_document(cfg: LabelerConfig, clip_id: str, notes: list[dict], *,
         "notes": out_notes,
         "mute_regions": [],
         "orphaned_labels": [],
+        # Human sign-off gating compilation (Labeler.compile skips unverified clips).
+        # A freshly (re)built document is always unverified — a rebuild invalidates
+        # any prior human verification (see merge_retranscribe, which does NOT carry it).
+        "verified": False,
         "view": {"px_per_sec": 200.0, "scroll_s": 0.0, "gt_variant": "cleaned"},
     }
 
@@ -192,6 +196,26 @@ def put_with_rev(cfg: LabelerConfig, clip_id: str, incoming: dict) -> dict:
         doc["clip_id"] = clip_id
         _write(cfg, clip_id, doc)
         return {"status": "ok", "rev": doc["rev"], "doc": doc}
+
+
+def set_verified(cfg: LabelerConfig, clip_id: str, verified: bool) -> dict | None:
+    """Flip a clip's ``verified`` sign-off, bumping ``rev`` (lock + rolling backup).
+
+    Verification is what gates :mod:`Labeler.compile`: only ``verified is True`` clips
+    are compiled into the standard dataset root. This is a first-class mutation (same
+    lock / backup / rev-bump discipline as :func:`put_with_rev`) so the editor's next
+    full-doc PUT — which carries ``verified`` through unchanged — sees the bumped rev and
+    does not 409. Returns the updated document (``None`` if the clip has no notes yet).
+    """
+    with lock_for(clip_id):
+        current = load(cfg, clip_id)
+        if current is None:
+            return None
+        _roll_backup(cfg, clip_id, current)
+        doc = dict(current)
+        doc["verified"] = bool(verified)
+        doc["rev"] = current.get("rev", 0) + 1
+        return _write(cfg, clip_id, doc)
 
 
 # --- retranscribe merge -----------------------------------------------------

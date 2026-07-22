@@ -10,8 +10,9 @@ note onsets and shifts the prior to remove it — all on in-memory arrays:
   * ``align_prior_to_gt`` ties them together: estimate, then shift the prior so it
     lines up with the GT, returning the aligned prior and the applied offset.
 
-``build_dataset`` estimates the offset once from the quantized prior and applies the
-same ``shift_samples`` to both prior variants, so they stay mutually aligned.
+``DataSynthesizer.build_dataset`` estimates the offset once from the quantized prior
+and applies the same ``shift_samples`` to both prior variants, so they stay mutually
+aligned; the Labeler reuses it to align transcribed notes to the cleaned audio.
 
 The onset method was manually verified on enough clips to trust as the automatic
 alignment. (QC visualizations — mel-spectrogram + onset-envelope overlays — live
@@ -19,8 +20,8 @@ in ``visualizations.ipynb``.)
 
 Example::
 
-    python -m DataSynthesizer.onset_align prior.wav gt.wav            # report offset
-    python -m DataSynthesizer.onset_align prior.wav gt.wav --apply    # write aligned prior
+    python -m common.onset_align prior.wav gt.wav            # report offset
+    python -m common.onset_align prior.wav gt.wav --apply    # write aligned prior
 """
 
 from __future__ import annotations
@@ -29,8 +30,7 @@ import numpy as np
 import librosa
 
 from common.audio_io import load_mono, write_pcm16
-
-from .config import HOP, SR
+from common.config import SR, HOP_SIZE as HOP
 
 
 def estimate_offset_seconds(prior: np.ndarray, gt: np.ndarray, sr: int = SR,

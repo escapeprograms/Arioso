@@ -1,10 +1,10 @@
 """Align the transcribed notes to the cleaned audio (residual global offset).
 
 MUSC's note times can carry a small constant offset vs. the actual audio. We
-measure it exactly the way the DataSynthesizer build does: render the quantized
-prior from ``musc_raw.mid`` (the pre-alignment flatten of the transcription) to
-the cleaned clip's length, then cross-correlate onset-strength envelopes via
-``DataSynthesizer.onset_align.estimate_offset_seconds``.
+measure it exactly the way the synthetic dataset build does: render the quantized
+prior from ``musc_raw.mid`` (the pre-alignment flatten of the transcription) via
+``common.prior.quantized_prior`` to the cleaned clip's length, then cross-correlate
+onset-strength envelopes via ``common.onset_align.estimate_offset_seconds``.
 
 Sign convention (inherited): ``estimate_offset_seconds`` is **positive when the
 prior lags the audio** (the MIDI events arrive late), so we advance the notes by
@@ -17,8 +17,8 @@ from __future__ import annotations
 import numpy as np
 
 from common.config import SR
-from DataSynthesizer.onset_align import estimate_offset_seconds
-from DataSynthesizer.synthesizePrior import quantized_prior
+from common.onset_align import estimate_offset_seconds
+from common.prior import quantized_prior
 
 
 def estimate_midi_offset(midi_path: str, cleaned: np.ndarray, sr: int = SR) -> float:

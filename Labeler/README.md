@@ -3,21 +3,22 @@
 Local web app for labeling the **new recorded violin dataset**: drop a wav in, it is
 denoised, auto-transcribed to notes by the vendored **MUSC** model
 (`external/violin-transcription`, the same model that produced the etude dataset's MIDIs),
-onset-aligned with the usual `DataSynthesizer.onset_align` convention, prefilled with
+onset-aligned with the usual `common.onset_align` convention, prefilled with
 onset-energy **velocities** and pitch-bend-derived **vibrato** flags — then hand-corrected
 and labeled (articulation / vibrato / velocity, full note editing) in a canvas piano-roll
 drawn **over the BigVGAN-contract mel**, with synchronized playback of the original audio
-and a simple oscillator MIDI synth. Saves canonical per-note annotations and exports
-MIDI + GT wav + per-frame conditioning arrays that the existing prior/conditioning
+and a simple oscillator MIDI synth. Saves canonical per-note annotations and compiles
+**verified** clips into a standard Arioso dataset root (GT wav + target/prior mel + onsets
++ per-frame conditioning arrays, `common.dataset_schema` layout) that the prior/conditioning
 pipeline consumes unchanged.
 
-Run **from the project root** (so `import common` / `import DataSynthesizer` resolve):
+Run **from the project root** (so `import common` resolves):
 
 ```bash
 PY="C:/Users/archi/Miniconda3/envs/ai-violin/python.exe"
 "$PY" -m Labeler.server                     # http://127.0.0.1:8765  (/ redirects to /static/)
 "$PY" -m Labeler.processing <wav-or-clip-id> [--force-from STAGE] [--notes-mode MODE]   # headless
-"$PY" -m Labeler.export <clip_id> [--frames] [--gt-variant cleaned|raw]                 # headless
+"$PY" -m Labeler.compile [--all | <clip_id> ...] [--config PATH] [--force]              # compile verified clips
 "$PY" -m pytest Labeler/tests -q            # 22 tests, no GPU/network
 ```
 
@@ -43,8 +44,10 @@ Installed into **ai-violin** on top of the training stack: `torchaudio==2.6.0+cu
   `mel/meta.json + tile_NNNN.png` (magma, 2048 frames/tile, p1–p99), `notes.json`
   (CANONICAL annotations), `notes.backup/` (rolling 20 revs + named snapshots),
   `status.json` (server-owned stage state/hashes).
-- `exports/` — `gt/<id>.wav`, `midi/<id>.mid`, `notes/<id>.notes.csv`,
-  `articulation_rec|vibrato_rec|velocity_rec/<id>.npy` (`[T]` uint8, mel grid).
+- compile output → `CompileParams.root` (default `Data/datasets/gt_arky`), the standard
+  dataset-root layout (`manifest.json`, `gt/<id>.wav`, `target_mel/`, `prior_mel/`, `onsets/`,
+  `cond/{articulation,velocity,vibrato}/<id>.npy`) — the contract + encodings are documented in
+  `common/README.md` (this root sets `signals: [articulation, velocity, vibrato]`).
 - `clip_id` = raw filename stem sanitized to `[A-Za-z0-9_-]`.
 
 ## notes.json schema (v1) + label preservation
@@ -54,12 +57,16 @@ technique: str, vibrato: bool, slur_group: null (reserved), auto: {velocity, tec
 vibrato, amplitude, onset_strength, vibrato_rate_hz, vibrato_extent_cents},
 human: {technique, vibrato, velocity, timing}}`. Clip level: audio/denoise + pipeline param
 blocks (with hashes), vocabulary snapshot, `mute_regions [{start_s, end_s, label}]`,
-`orphaned_labels`, `view {px_per_sec, scroll_s, gt_variant}` (snake_case), `rev`.
+`orphaned_labels`, `view {px_per_sec, scroll_s, gt_variant}` (snake_case), `rev`, and the
+top-level **`verified: false`** sign-off flag (missing → `False`; additive, no schema bump —
+the 59 existing clips need no migration). `verified` **gates compilation** (only verified
+clips are compiled) and is set via `POST /api/clips/{id}/verified` (UI badge + toggle).
 
 Reprocessing (`notes_mode`): **keep_labels** (default) — finalize never touches an existing
 notes.json that has human edits; **retranscribe_merge** — snapshot, then base = fresh auto
 notes, old human-flagged facets copied onto matches (equal pitch, |Δonset| ≤ 60 ms, greedy
-nearest, once), unmatched human-touched notes → `orphaned_labels`; **reset_notes** —
+nearest, once), unmatched human-touched notes → `orphaned_labels`, and **`verified` is NOT
+carried** (a rebuild invalidates the sign-off, so it resets to `False`); **reset_notes** —
 snapshot then rebuild. Saves are atomic (`.tmp` + `os.replace`) with optimistic `rev`
 locking (409 on stale).
 
@@ -70,7 +77,9 @@ locking (409 on stale).
 `GET .../status` (poll 500 ms; state/stage/pct) · `GET .../meta` (durations,
 offset_applied_s, `mel.mel_bin_of_midi[128]`, `media` URL map incl. per-tile widths) ·
 `GET|PUT .../notes` (+POST alias for sendBeacon; 409 rev_conflict/job_running) ·
-`POST .../export {gt_variant?, include_frames?}` · `/media/<clip>/…` StaticFiles (wav
+`POST .../verified {verified}` (rev-bumping sign-off; 409 job_running) ·
+`POST /api/compile` + `GET /api/compile/status` (background compile of verified clips;
+409 compile_running) · `/media/<clip>/…` StaticFiles (wav
 Range/206). `/` **redirects to `/static/`** — index.html uses relative `./js` refs that
 only resolve under the mount.
 
@@ -79,10 +88,11 @@ only resolve under the mount.
 Click note = select + playhead to its start; click empty = playhead only; Esc deselect.
 `1..9` assign technique (order from `labeler.yaml`) + auto-advance to next note.
 `space` play from playhead / pause + snap playhead to selected note. `v` vibrato toggle.
-`←`/`→` prev/next note. `↑`/`↓` velocity ±5. `ctrl+z`/`ctrl+y` undo/redo. `[`/`]` speed.
-`m`/`n` mute Original/MIDI. `f` follow-playhead. `s` save. Editing: drag body move
-(semitone snap) / edges resize, `Del` delete, double-click add, `x` split at playhead,
-`g` mute-region paint on ruler. Wheel pans time; ctrl+wheel zooms (40–1000 px/s).
+`←`/`→` prev/next note. `↑`/`↓` pitch ±1 semitone, `shift+↑`/`↓` velocity ±5.
+`ctrl+z`/`ctrl+y` undo/redo. `[`/`]` speed. `m`/`n` mute Original/MIDI. `f`
+follow-playhead. `s` save. Editing: drag body move (semitone snap) / right edge resize,
+`Del` delete, double-click add, `x` split selected note at playhead, `c` split all notes
+at playhead, `g` mute-region paint on ruler. Wheel pans time; ctrl+wheel zooms (40–1000 px/s).
 
 ## Files (backend)
 
@@ -90,7 +100,7 @@ Click note = select + playhead to its start; click empty = playhead only; Esc de
 - **`labeler.yaml`** — user config: `dataset_root`, `port`, `editing_enabled`, articulation
   vocabulary `[{name,key,color,abbrev}]` (default normal/slur/spiccato/detache on 1–4;
   adding a class = one entry, keys auto-bind in order), `speeds`, and the
-  denoise/transcribe/velocity/vibrato/export/media parameter groups. The `transcribe` group
+  denoise/transcribe/velocity/vibrato/compile/media parameter groups. The `transcribe` group
   carries the recall-biased decode knobs (`onset_thresh`/`frame_thresh`/`min_note_len_ms`)
   plus `batch_size`. Partial override of code defaults.
 - **`config.py`** — `LabelerConfig` dataclass tree + YAML loader (`load_config`; unknown key
@@ -101,8 +111,8 @@ Click note = select + playhead to its start; click empty = playhead only; Esc de
   constants), `sanitize_clip_id`, `scan_clips`/`get_clip_info` (state raw/processing/
   ready/error, duration via `soundfile.info`), `ClipNotFound`, atomic `read_json`/
   `atomic_write_json` — the primitives every stage uses.
-- **`transcribe.py`** — MUSC vendoring (sys.path, mirrors `DataSynthesizer/technique.py`'s
-  VioPTT pattern) + lazy model singleton `get_model` (cuda→cpu fallback, `GPU_LOCK`,
+- **`transcribe.py`** — MUSC vendoring (sys.path, mirrors `common.vocoder`'s BigVGAN
+  vendoring pattern) + lazy model singleton `get_model` (cuda→cpu fallback, `GPU_LOCK`,
   torch-2.6 `weights_only` retry-shim, `CheckpointMissing` with the manual download recipe).
   `transcribe_notes(y_44k, params)` runs `model.predict` (caller holds `GPU_LOCK`), then
   **decodes the posteriors itself** — it does NOT use MUSC's `model.transcribe`/`out2note`,
@@ -124,7 +134,7 @@ Click note = select + playhead to its start; click empty = playhead only; Esc de
   time-constant) → `voiced_rms_normalize` to −20 dBFS (matches the dataset convention).
   Removes buzz/hiss; discrete page-turn thumps are handled by mute regions instead.
 - **`align.py`** — `estimate_midi_offset`: render quantized prior from `musc_raw.mid`
-  (`DataSynthesizer.synthesizePrior.quantized_prior`) → `estimate_offset_seconds` vs the
+  (`common.prior.quantized_prior`) → `estimate_offset_seconds` vs the
   cleaned audio (positive ⇒ MIDI lags) → `apply_offset` shifts note times by −offset
   (clamp ≥ 0); `offset_applied_s = -offset` recorded. ≈ 0 for self-transcribed clips by
   construction; matters for imported MIDI.
@@ -143,8 +153,8 @@ Click note = select + playhead to its start; click empty = playhead only; Esc de
   program 40 ("violin"), int velocities, **no pitch bends**, resolution 480 (so
   `note_groups_from_midi` onset frames survive the write/read round-trip);
   `validate_for_export` (zero/neg duration = error, same-pitch overlap = warning).
-  This is the repo's only MIDI **writer**; consumers (`synthesizePrior`, `note_onsets`,
-  `note_groups_from_midi`) read it identically to the etude MIDIs.
+  This is the repo's only MIDI **writer**; consumers (`common.prior` `render`/`note_onsets`,
+  `common.dataset_schema.note_groups_from_midi`) read it identically to the etude MIDIs.
 - **`media.py`** — viewer derivatives (matplotlib Agg, lazy torch): `mel_tiles`
   (`common.vocoder.mel_spectrogram` → p1–p99 → magma PNGs + `meta.json` incl.
   `mel_bin_of_midi[128]` from `librosa.mel_frequencies` interpolation), `write_onset_env`,
@@ -152,21 +162,22 @@ Click note = select + playhead to its start; click empty = playhead only; Esc de
 - **`processing.py`** — the 8-stage `Pipeline` with per-stage params-hash skip cache
   (+ cascade + `--force-from`), the `_auto.json` intermediate, `JobManager` (background
   thread, per-clip lock, live `status.json`), `process_cli`.
-- **`export.py`** — `export_clip`: validated MIDI + mute-region-cosine-zeroed GT wav
-  (5 ms edges) + `build_techniques`-template CSV (+`velocity,vibrato` columns) + per-frame
-  npys — articulation via `note_groups_from_midi` + `expand_to_frames` (REST_ID=5 remapped
-  to the local rest index; guard: ≤ 5 articulation classes), vibrato/velocity via direct
-  span fill with the same `np.round(t·SR/HOP)` rounding. Wiring a signal into Arioso is one
-  YAML stanza, e.g.
-  `conditioning: [technique, {name: articulation_rec, num_classes: 5, emb_dim: 32, dir: recorded/exports/articulation_rec, pad_id: 4}]`
-  (per `Arioso/run_config.py::_parse_conditioning`; an infer-time builder is still needed
-  for generation).
-- **`server.py`** — `create_app`: cfg + JobManager on `app.state`; mounts `/api`,
+- **`compile.py`** — `compile_all`/`compile_one`: the gt_arky → standard-root producer.
+  Per **verified** clip: validate every note articulation ∈ `common.dataset_schema.ARTICULATIONS`,
+  drop notes whose midpoint is inside a mute region, cosine-zero mutes (5 ms) + voiced-RMS
+  normalize the chosen wav → `gt/`, mel → `target_mel/`, prior (surviving notes →
+  `notes_to_pretty_midi` → `common.prior.quantized_prior().render`) → `prior_mel/`, `onsets/`
+  + `cond/{articulation,velocity,vibrato}/` via the schema rasterizers. Incremental/idempotent
+  on a `{rev, notes_hash, compile_hash}` provenance triple; a full `--all` run prunes clips no
+  longer verified (manifest + artifacts). `CompileManager` runs it on a background thread for
+  the API. `notes_hash` = sha1 over a canonical dump of the notes (`start_s/end_s/pitch/velocity/
+  technique/vibrato`, times rounded 1e-6) + mute regions (`start_s/end_s`).
+- **`server.py`** — `create_app`: cfg + JobManager + CompileManager on `app.state`; mounts `/api`,
   `/media` (Range for free), `/static` (html=True); `/` → RedirectResponse(`/static/`);
   Windows `.js/.mjs/.css` MIME fix at startup. `main`: uvicorn 127.0.0.1:8765, single
   process, **no reload** (MUSC singleton).
-- **`api.py`** — thin routes onto library/processing/notes_store/export; documented error
-  codes; reads cfg/jobs from `request.app.state`.
+- **`api.py`** — thin routes onto library/processing/notes_store/compile; documented error
+  codes; reads cfg/jobs/compiler from `request.app.state`.
 - **`tests/`** — 25 pytest cases, GPU/network-free: velocity mapping, vibrato synthetic FM
   (true/flat/drift/short), notes_store rev-conflict + merge semantics, MIDI round-trip
   through `note_groups_from_midi`, align sign convention on synthetic click tracks, and
@@ -222,13 +233,13 @@ Click note = select + playhead to its start; click empty = playhead only; Esc de
 ## Limitations / deferred
 
 - Vibrato prefill is conservative (< 0.3 s notes never flagged); tune
-  `labeler.yaml: vibrato`. Frame export guards ≤ 5 articulation classes (REST_ID collision).
+  `labeler.yaml: vibrato`. Compile hard-errors on any note articulation outside the unified
+  `common.dataset_schema.ARTICULATIONS` vocab, and on a config articulation name not in it.
 - Transcription is deliberately recall-biased (`labeler.yaml: transcribe`, `min_note_len_ms`
   45 vs MUSC's 127.7): it over-segments (extra short/spurious notes) so the human trims
   rather than re-adds. Lowering thresholds further raises the false-positive cleanup cost;
   raising `min_note_len_ms` back toward 127.7 drops genuine short (spiccato) notes.
 - `--force-from` is linear (re-runs media even for notes-only changes). Eager stretches
   slow first-process of very long takes; recommend ≤ ~10 min per take.
-- Follow-ups (not built): VioPTT technique prefill toggle, bulk-assign technique on
-  selection, auto-play-on-select, loop-selected-note, long-take splitter, velocity/vibrato
-  CondSpec infer-time builders in `Arioso/infer.py`.
+- Follow-ups (not built): bulk-assign technique on selection, auto-play-on-select,
+  loop-selected-note, long-take splitter.

@@ -1,31 +1,17 @@
-"""Training-feature builders for the DataSynthesizer: mels + onset mask.
+"""Onset-mask training-feature builder for the DataSynthesizer.
 
-Keeps ``build_dataset`` thin. Two pieces:
-
-* ``mel_for_training`` — turn an aligned waveform into the BigVGAN-compatible mel
-  that the vocoder and training expect (the project's single source of truth is
-  ``common.vocoder.mel_spectrogram``).
-* ``build_onset_mask`` — turn the score onsets into the onset-mask training signal
-  at the same mel granularity: 1 on each onset frame, exponential decay to ~0 over
-  a short support window.
+The mel front-end now lives in ``common.vocoder.mel_frames`` (the project's single
+source of truth, matching the vocoder checkpoint) — import it there. What remains here
+is ``build_onset_mask``: it turns the score onsets into the onset-mask training signal
+at the same mel granularity — 1 on each onset frame, exponential decay to ~0 over a
+short support window — which is specific to ``build_dataset``'s pass-1 outputs.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from common.vocoder import mel_spectrogram
-
 from .config import HOP, ONSET_DECAY_FLOOR, ONSET_DECAY_MS, SR
-
-
-def mel_for_training(wav: np.ndarray) -> np.ndarray:
-    """BigVGAN mel of ``wav`` as a ``[N_MELS, T]`` float32 array.
-
-    Uses ``common.vocoder.mel_spectrogram`` (which matches the vocoder checkpoint),
-    then drops the leading batch dim and moves to numpy.
-    """
-    return mel_spectrogram(wav)[0].cpu().numpy().astype(np.float32)
 
 
 def build_onset_mask(onset_times, applied: float, n_frames: int, sr: int = SR,

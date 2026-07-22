@@ -1,8 +1,8 @@
 """MUSC violin-transcription wrapper: lazy model singleton -> note events.
 
 Vendors MTG's MUSC model (``external/violin-transcription``) the same way
-``DataSynthesizer.technique`` vendors VioPTT — the repo dir goes on ``sys.path``
-so ``import musc`` resolves, and torch is imported *lazily* inside the functions
+``common.vocoder`` vendors BigVGAN — the repo dir goes on ``sys.path`` so
+``import musc`` resolves, and torch is imported *lazily* inside the functions
 that need it (so importing this module for its dataclasses stays torch-free and
 pytest collection is fast).
 

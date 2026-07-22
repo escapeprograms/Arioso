@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from common.config import SR
-from DataSynthesizer.onset_align import estimate_offset_seconds
+from common.onset_align import estimate_offset_seconds
 
 
 def _click_track(onsets_s, dur_s=3.0, sr=SR):

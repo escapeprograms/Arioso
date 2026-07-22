@@ -32,17 +32,23 @@ Both sources render from an f0 curve via an **exclusive prefix-sum phase**
 ``arange(n) * dt`` math: the named flavors below stay numerically identical to the
 hand-written renderers they replace. Everything runs at **44.1 kHz mono**.
 
-:func:`quantized_prior` assembles the spec-baseline pipeline from the
-``PRIOR_*`` config constants. The module-level :func:`render_prior` /
-:func:`render_prior_bend` wrappers reproduce the original peak-normalized priors
-used by ``build_dataset`` and the wav CLI. The mel front-end is intentionally NOT
-part of the pipeline: the dataset build shifts the waveform into GT alignment
-*between* level-matching and mel, while inference mels directly, so the caller owns
-that step (``DataSynthesizer.features.mel_for_training``).
+:func:`quantized_prior` assembles the spec-baseline pipeline from the module-level
+``PRIOR_*`` constants (the single source of truth for the prior shape, shared by
+DataSynthesizer's dataset build, Arioso inference and the Studio renderer). The
+module-level :func:`render_prior` / :func:`render_prior_bend` wrappers reproduce the
+original peak-normalized priors used by ``build_dataset`` and the wav CLI. The mel
+front-end is intentionally NOT part of the pipeline: the dataset build shifts the
+waveform into GT alignment *between* level-matching and mel, while inference mels
+directly, so the caller owns that step (``common.vocoder.mel_frames``).
+
+:meth:`PriorSynth.render` and :func:`note_onsets` accept either a path to a ``.mid``
+file or an already-loaded ``pretty_midi.PrettyMIDI`` object, so callers holding an
+in-memory score (e.g. the Labeler compile step rendering from a note list via
+``notes_to_pretty_midi``) need not round-trip through disk.
 
 Run as a script::
 
-    python DataSynthesizer/synthesizePrior.py path/to/clip.mid -o clip_prior.wav
+    python -m common.prior path/to/clip.mid -o clip_prior.wav
 """
 
 from __future__ import annotations
@@ -55,13 +61,26 @@ import pretty_midi
 from scipy.signal import sawtooth
 
 from common.audio_io import write_pcm16
-from common.config import DEFAULT_PEAK
-
-from .config import (FADE_MS, PRIOR_ALPHA, PRIOR_CORNER_NC, PRIOR_CORNER_P,
-                     PRIOR_ENVELOPE, PRIOR_HARMONIC_LAW, PRIOR_LEVEL_MATCH, PRIOR_SOURCE,
-                     SR, TARGET_RMS_DBFS)
+from common.config import DEFAULT_PEAK, SR, TARGET_RMS_DBFS
 
 PB_RANGE_SEMITONES = 2.0  # MIDI default pitch-wheel range (the dataset sets no RPN)
+
+# --- Prior synthesis knobs (the spec baseline) ----------------------------------
+# The components the PriorSynth factory assembles for the model's training prior. The
+# prior is masked-RMS level-matched to the SAME common.config.TARGET_RMS_DBFS the GT was
+# scaled to, so prior/target levels agree and the match stays score-determined. The
+# additive source shapes the saw's harmonic ladder: the rounded-corner law (n_c=8, p=2)
+# cut prior->target mel RMSE 3.070 -> 2.718 by dropping the HF excess the targets don't
+# carry. "blep_saw" is the old polyBLEP baseline. These live here (not DataSynthesizer)
+# because the prior is now shared by DataSynthesizer, Arioso inference and Studio.
+FADE_MS = 5.0                    # per-note linear fade in/out, to avoid click artifacts
+PRIOR_SOURCE = "additive"        # "blep_saw" (old baseline) | "naive_saw" | "additive"
+PRIOR_HARMONIC_LAW = "corner"    # additive only: "alpha" (n^-alpha) | "corner" (rounded)
+PRIOR_ALPHA = 1.0                # tilt exponent; doubles as the corner law's below-corner tilt
+PRIOR_CORNER_NC = 8.0            # sweep winner n_c=8, p=2 (RMSE 2.718 vs 3.070)
+PRIOR_CORNER_P = 2.0
+PRIOR_ENVELOPE = "rect"          # "rect" HardGate (hard on/off) | "fade" anti-click ramp
+PRIOR_LEVEL_MATCH = "masked_rms" # "masked_rms" (sounding-RMS -> TARGET_RMS_DBFS) | "peak"
 
 
 # --- module-level helpers (flavor-independent) -----------------------------------
@@ -118,14 +137,21 @@ def _rms(y: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(y)))) if y.size else 0.0
 
 
-def note_onsets(midi_path: str) -> np.ndarray:
+def _as_pretty_midi(midi: "str | pretty_midi.PrettyMIDI") -> "pretty_midi.PrettyMIDI":
+    """Accept a path or an already-loaded score; return a ``PrettyMIDI`` either way."""
+    if isinstance(midi, str):
+        return pretty_midi.PrettyMIDI(midi)
+    return midi
+
+
+def note_onsets(midi: "str | pretty_midi.PrettyMIDI") -> np.ndarray:
     """Sorted, de-duplicated note onset times (seconds) across all instruments.
 
     These come straight from the score, so they are the exact onsets carried by the
     rendered prior; the build passes use them to build the onset-mask training signal
-    at mel granularity.
+    at mel granularity. ``midi`` may be a path or a loaded ``pretty_midi.PrettyMIDI``.
     """
-    pm = pretty_midi.PrettyMIDI(midi_path)
+    pm = _as_pretty_midi(midi)
     onsets = [note.start for inst in pm.instruments for note in inst.notes]
     return np.unique(np.asarray(onsets, dtype=np.float64))
 
@@ -363,14 +389,17 @@ class PriorSynth:
         self.body = body or Identity()
         self.sr = sr
 
-    def render(self, midi_path: str, total_samples: int | None = None) -> np.ndarray:
+    def render(self, midi: "str | pretty_midi.PrettyMIDI",
+               total_samples: int | None = None) -> np.ndarray:
         """Score -> mono float32 prior waveform.
 
-        ``total_samples`` sets the output length; defaults to the MIDI end time. Pass
-        the GT audio length so the prior and target are sample-for-sample aligned.
+        ``midi`` is a path to a ``.mid`` file or an already-loaded
+        ``pretty_midi.PrettyMIDI``. ``total_samples`` sets the output length; defaults
+        to the MIDI end time. Pass the GT audio length so the prior and target are
+        sample-for-sample aligned.
         """
         sr = self.sr
-        pm = pretty_midi.PrettyMIDI(midi_path)
+        pm = _as_pretty_midi(midi)
         if total_samples is None:
             total_samples = int(round(pm.get_end_time() * sr))
         out = np.zeros(total_samples, dtype=np.float64)

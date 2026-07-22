@@ -36,12 +36,14 @@ import traceback
 import numpy as np
 import soundfile as sf
 
+from common.onset_align import estimate_offset_seconds, shift_samples
+from common.prior import note_onsets, render_prior, render_prior_bend
+from common.vocoder import mel_frames
+
 from .clip_name import parse_clip_name
 from .config import BOOKS, DEFAULT_DATASET, DEFAULT_OUT, SR
 from .download_audio import fetch_clip
-from .features import build_onset_mask, mel_for_training
-from .onset_align import estimate_offset_seconds, shift_samples
-from .synthesizePrior import note_onsets, render_prior, render_prior_bend
+from .features import build_onset_mask
 
 MANIFEST_FIELDS = [
     "basename", "book", "composer", "catalog", "performer", "youtube_id",
@@ -95,7 +97,7 @@ def process_clip(midi_path: str, out_dir: str, cache_dir: str,
     # 1) Target audio (download cached + level-normalized, then trim) + its mel. The
     #    download is the step that can fail when a video is private/removed/blocked.
     _, y_gt, _ = fetch_clip(midi_path, cache_dir, out_path=gt_path, sr=sr)
-    np.save(target_mel_path, mel_for_training(y_gt))
+    np.save(target_mel_path, mel_frames(y_gt))
 
     # 2) Both priors, rendered to exactly the GT length so each pair is sample-aligned.
     y_quant = render_prior(midi_path, sr=sr, total_samples=len(y_gt))
@@ -107,9 +109,9 @@ def process_clip(midi_path: str, out_dir: str, cache_dir: str,
     applied = -estimate_offset_seconds(y_quant, y_gt, sr=sr)
     y_quant = shift_samples(y_quant, applied, sr)
     y_bend = shift_samples(y_bend, applied, sr)
-    prior_mel_quant = mel_for_training(y_quant)
+    prior_mel_quant = mel_frames(y_quant)
     np.save(prior_mel_quant_path, prior_mel_quant)
-    np.save(prior_mel_bend_path, mel_for_training(y_bend))
+    np.save(prior_mel_bend_path, mel_frames(y_bend))
 
     # 4) Onset mask on the mel grid (shared; onset timings are identical for both).
     n_frames = prior_mel_quant.shape[-1]

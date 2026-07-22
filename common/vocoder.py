@@ -137,6 +137,17 @@ def mel_spectrogram(wav, device: str = "cpu") -> torch.Tensor:
     return _bigvgan_mel(wav, N_FFT, N_MELS, SR, HOP_SIZE, WIN_SIZE, FMIN, FMAX)
 
 
+def mel_frames(wav) -> np.ndarray:
+    """BigVGAN mel of ``wav`` as a ``[N_MELS, T]`` float32 numpy array.
+
+    The training/inference feature front-end: :func:`mel_spectrogram` (which matches
+    the vocoder checkpoint), with the leading batch dim dropped and moved to numpy.
+    Every producer (DataSynthesizer dataset build, Labeler compile, Studio render,
+    Arioso inference) mels through this one function so the feature can never drift.
+    """
+    return mel_spectrogram(wav)[0].cpu().numpy().astype(np.float32)
+
+
 def vocode(model, mel: torch.Tensor) -> np.ndarray:
     """Run the vocoder: ``[1, N_MELS, frames]`` mel -> 1-D float waveform."""
     device = next(model.parameters()).device

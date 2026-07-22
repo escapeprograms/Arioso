@@ -1,7 +1,7 @@
 """Project document -> ``pretty_midi.PrettyMIDI`` for the render pipeline / export.
 
 Turns a Studio ``project.json`` (notes in **beats**, per-note bend/vibrato) into a
-MIDI score the DataSynthesizer saw prior consumes. The one non-trivial step is
+MIDI score the ``common.prior`` saw prior consumes. The one non-trivial step is
 polyphony: overlapping notes are split into monophonic **voices**
 (:mod:`Studio.voices`), one ``pretty_midi.Instrument(program=40)`` each, so every
 voice carries an unambiguous pitch-wheel curve; :class:`PriorSynth` sums the

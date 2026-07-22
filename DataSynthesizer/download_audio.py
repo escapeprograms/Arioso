@@ -19,9 +19,9 @@ import librosa
 import numpy as np
 
 from common.audio_io import load_mono, voiced_rms_normalize, write_pcm16
+from common.config import SR, TARGET_RMS_DBFS, VOICED_TOP_DB
 
 from .clip_name import parse_clip_name
-from .config import SR, TARGET_RMS_DBFS, VOICED_TOP_DB
 
 
 def download_full_audio(youtube_id: str, cache_dir: str, sr: int = SR,

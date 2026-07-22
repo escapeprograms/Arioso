@@ -15,16 +15,15 @@ Model selection runs on these, never on vocoded audio:
 from __future__ import annotations
 
 import argparse
-import csv
 import os
 
 import numpy as np
 import torch
 from scipy.fft import dct
 
-from DataSynthesizer.config import DEFAULT_OUT
+from common.dataset_schema import DatasetRoot
 
-from ..config import PRIOR_MEL_DIR, cfg_from_dict
+from ..config import cfg_from_dict
 from ..infer import generate_mel
 from ..model import AriosoModel
 from ..splits import make_split
@@ -42,8 +41,8 @@ def mcd(a: np.ndarray, b: np.ndarray) -> float:
     return float(_MCD_COEF * per_frame.mean())
 
 
-def _val_basenames(out_dir: str, limit: int | None) -> list[str]:
-    split = make_split(out_dir)
+def _val_basenames(root: DatasetRoot, limit: int | None) -> list[str]:
+    split = make_split(root)
     bases = split["val"]
     return bases[:limit] if limit else bases
 
@@ -71,7 +70,8 @@ def _delta_plot(pred: np.ndarray, prior: np.ndarray, target: np.ndarray, path: s
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out-dir", default=DEFAULT_OUT)
+    ap.add_argument("--data-root", default="Data",
+                    help="dataset root to evaluate on (eval is single-root)")
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--weights", choices=("ema", "model"), default="ema")
     ap.add_argument("--limit", type=int, default=8, help="number of held-out recordings to score")
@@ -86,28 +86,25 @@ def main() -> None:
     model.load_state_dict(ckpt[args.weights])
     model.eval()
 
-    prior_dir = os.path.join(args.out_dir, PRIOR_MEL_DIR)
-    target_dir = os.path.join(args.out_dir, "target_mel")
+    root = DatasetRoot(args.data_root)
     recon_mse, prior_mse, mcd_pred, mcd_prior, n = 0.0, 0.0, 0.0, 0.0, 0
-    for i, base in enumerate(_val_basenames(args.out_dir, args.limit)):
-        pp, tp = os.path.join(prior_dir, base + ".npy"), os.path.join(target_dir, base + ".npy")
+    for i, base in enumerate(_val_basenames(root, args.limit)):
+        pp, tp = root.prior_mel_path(base), root.target_mel_path(base)
         if not (os.path.isfile(pp) and os.path.isfile(tp)):
             continue
         prior = np.load(pp).astype(np.float32)
         target = np.load(tp).astype(np.float32)
 
-        # Load each conditioning signal's per-frame id track (same skip/warn as a missing mel);
-        # tracks are on the prior mel's frame grid, so no slicing before generate_mel.
+        # Per-frame conditioning id tracks on the prior mel's frame grid (no slicing before
+        # generate_mel). A signal this root lacks gets the CFG "unknown" fill (spec.num_classes),
+        # mirroring the training dataset's unknown-fill so conditioned eval on an unlabelled root
+        # still runs; on-disk tracks are read for signals the root provides.
         cond_frames = {}
-        missing_cond = False
         for spec in cfg.conditioning:
-            cp = os.path.join(args.out_dir, spec.dir, base + ".npy")
-            if not os.path.isfile(cp):
-                missing_cond = True
-                break
-            cond_frames[spec.name] = np.load(cp)[:prior.shape[-1]]
-        if missing_cond:
-            continue
+            if spec.name not in root.signals:
+                cond_frames[spec.name] = np.full(prior.shape[-1], spec.num_classes, dtype=np.int64)
+            else:
+                cond_frames[spec.name] = np.load(root.cond_path(spec.name, base))[:prior.shape[-1]]
         cond_frames = cond_frames or None
 
         pred = generate_mel(model, prior, cfg, args.device,

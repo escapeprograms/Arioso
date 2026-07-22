@@ -46,19 +46,23 @@ function bandOf(y){
 }
 
 function hitNote(xInRoll, yInPiano){
-  let best = null;
+  let body = null, edgeHit = null, edgeDist = Infinity;
   for (const n of visibleNotes()){
     const r = noteRect(n);
     if (yInPiano < r.y - 4 || yInPiano > r.y + r.h + 4) continue;
-    if (xInRoll < r.x - EDGE_PX || xInRoll > r.x + r.w + EDGE_PX) continue;
-    let edge = null;
     if (editing()){
-      if (Math.abs(xInRoll - r.x) <= EDGE_PX) edge = 'start';
-      else if (Math.abs(xInRoll - (r.x + r.w)) <= EDGE_PX) edge = 'end';
+      // right-edge resize zone; clamp so short notes keep a grabbable left half
+      const endX = r.x + r.w;
+      const inner = Math.max(r.x + r.w / 2, endX - EDGE_PX);
+      const d = Math.abs(xInRoll - endX);
+      if (xInRoll >= inner && xInRoll <= endX + EDGE_PX && d <= edgeDist){
+        edgeDist = d; edgeHit = { note: n, edge: 'end' };
+      }
     }
-    best = { note: n, edge };           // last (topmost drawn) wins
+    if (xInRoll < r.x - EDGE_PX || xInRoll > r.x + r.w + EDGE_PX) continue;
+    body = { note: n, edge: null };     // last (topmost drawn) wins
   }
-  return best;
+  return edgeHit || body;               // edge beats body: left note's end wins at a shared boundary
 }
 function noteAtTime(t){
   let best = null, bestw = Infinity;
@@ -118,7 +122,7 @@ function onDown(e){
   if (hit){
     select(hit.note.id, { playhead: hit.note.start_s });    // click note = select + playhead
     if (editing() && hit.edge){
-      ptr = { mode: 'pending', drag: 'resize', id: hit.note.id, edge: hit.edge, sx: e.clientX, sy: e.clientY };
+      ptr = { mode: 'pending', drag: 'resize', id: hit.note.id, sx: e.clientX, sy: e.clientY };
     } else if (editing()){
       ptr = { mode: 'pending', drag: 'move', id: hit.note.id, sx: e.clientX, sy: e.clientY,
               orig: { start: hit.note.start_s, end: hit.note.end_s, pitch: hit.note.pitch } };
@@ -176,10 +180,8 @@ function onMove(e){
     const dSec = (e.clientX - ptr.sx) / store.view.pxPerSec;
     ptr.pending = { dSec };
     const nn = noteById(ptr.id);
-    let s = nn.start_s, en = nn.end_s;
-    if (ptr.edge === 'start') s = Math.min(nn.start_s + dSec, nn.end_s - 0.02);
-    else en = Math.max(nn.end_s + dSec, nn.start_s + 0.02);
-    store.drag.previewRect = ghostRect(s, en, nn.pitch);
+    const en = Math.max(nn.end_s + dSec, nn.start_s + 0.02);
+    store.drag.previewRect = ghostRect(nn.start_s, en, nn.pitch);
     return;
   }
 }
@@ -201,7 +203,7 @@ function onUp(e){
     const { dStart, dPitch } = p.pending;
     if (dStart !== 0 || dPitch !== 0) apply(edit.moveNote(p.id, dStart, dPitch, { phAfter: noteById(p.id).start_s + dStart }));
   } else if (p.mode === 'resize' && p.pending){
-    if (p.pending.dSec !== 0) apply(edit.resizeNote(p.id, p.edge, p.pending.dSec));
+    if (p.pending.dSec !== 0) apply(edit.resizeNote(p.id, p.pending.dSec));
   } else if (p.mode === 'vel' && store.drag){
     apply(edit.setVelocity(p.id, store.drag.preview));
   } else if (p.mode === 'region' && store.drag){

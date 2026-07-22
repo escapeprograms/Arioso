@@ -14,7 +14,7 @@ reported to the polling UI through the ``progress(status)`` callback the
   1. **serialize** — write the segment's (time-shifted) notes to a temp ``.mid``
      (:mod:`Studio.midi_export`: voices -> instruments, bend/vibrato -> pitch-wheel).
   2. **prior** — ``quantized_prior(pitch=...)`` -> ``synth.render(midi, total_samples)``
-     (the segment span incl. pads, so the tail isn't clipped) -> ``mel_for_training``.
+     (the segment span incl. pads, so the tail isn't clipped) -> ``mel_frames``.
   3. **model** — lazy-load the checkpoint (:mod:`Studio.model_registry`) and run
      ``generate_mel`` (chunked CFM ODE, ``cond_frames=None`` — renders are always
      unconditioned for now).
@@ -115,9 +115,8 @@ def _render_segments(cfg, doc: dict, to_render: list[dict], cache_dir: str,
 
     from Arioso.infer import generate_mel
     from common.audio_io import write_pcm16
-    from common.vocoder import vocode
-    from DataSynthesizer.features import mel_for_training
-    from DataSynthesizer.synthesizePrior import quantized_prior
+    from common.prior import quantized_prior
+    from common.vocoder import mel_frames, vocode
 
     from .library import models_root as _models_root
     from .model_registry import get_model, get_vocoder
@@ -144,8 +143,8 @@ def _render_segments(cfg, doc: dict, to_render: list[dict], cache_dir: str,
         warnings.extend(seg_warn)
 
         synth = quantized_prior(pitch=pitch)
-        prior_mel = mel_for_training(synth.render(midi_path,
-                                                  total_samples=total_samples))
+        prior_mel = mel_frames(synth.render(midi_path,
+                                            total_samples=total_samples))
 
         _emit(progress, "model", base_pct + 3,
               f"segment {done}/{n_render}: generating mel",

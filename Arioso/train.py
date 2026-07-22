@@ -22,8 +22,6 @@ import re
 
 import torch
 
-from DataSynthesizer.config import DEFAULT_OUT
-
 from .augment import adr_per_sample, build_augmentor, perturb_off_path, sample_t1
 from .cfm import (LOSSES, interpolate, masked_mse_per_sample)
 from .config import CKPT_DIR, WANDB_ENTITY, WANDB_PROJECT, AriosoConfig, cfg_to_dict
@@ -195,7 +193,7 @@ def evaluate(model, loader, cfg, device, max_batches: int = 20) -> dict[str, flo
 
 def train(cfg: AriosoConfig, run_s: RunSettings) -> None:
     torch.manual_seed(cfg.seed)
-    out_dir = run_s.out_dir
+    data_roots = run_s.data_roots
     batch_size = run_s.batch_size
     device = run_s.device
     log_every, ckpt_every, val_every = run_s.log_every, run_s.ckpt_every, run_s.val_every
@@ -230,8 +228,8 @@ def train(cfg: AriosoConfig, run_s: RunSettings) -> None:
     if run:
         run.save(resolved_path, policy="now")
 
-    train_loader = build_dataloader(out_dir, "train", batch_size, cfg, shuffle=True)
-    val_loader = build_dataloader(out_dir, "val", batch_size, cfg, shuffle=False)
+    train_loader = build_dataloader(data_roots, "train", batch_size, cfg, shuffle=True)
+    val_loader = build_dataloader(data_roots, "val", batch_size, cfg, shuffle=False)
     print(f"train clips: {len(train_loader.dataset)}  val clips: {len(val_loader.dataset)}  "
           f"batches/epoch: {len(train_loader)}")
 
@@ -373,8 +371,8 @@ def main() -> None:
     # precedence is smoke clamps > CLI > YAML > code defaults (only flags actually passed override).
     ap.add_argument("--config", default=None,
                     help="YAML run-config (see Arioso/configs/); omit for code defaults")
-    ap.add_argument("--out-dir", default=None,
-                    help=f"data root (default: YAML/{DEFAULT_OUT})")
+    ap.add_argument("--data-root", action="append", dest="data_roots", default=None,
+                    help="dataset root (repeatable; default: YAML/Data)")
     ap.add_argument("--batch-size", type=int, default=None, help="default: YAML/8")
     ap.add_argument("--steps", type=int, default=None,
                     help="override total_steps (default: YAML/cfg.total_steps)")

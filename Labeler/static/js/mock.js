@@ -137,13 +137,24 @@ export async function getConfig(){
   return { articulations: ARTS, default_articulation: 'normal', editing_enabled: true,
            speeds: [1, 0.5, 0.25], sr: SR, hop: HOP, dataset_root: 'Data/recorded' };
 }
+let mockVerified = false;
 export async function getClips(){
-  return [{ id: 'mock_scale', name: 'mock_scale (demo)', duration_s: DUR, state: 'ready', has_notes: true, human_edits: true }];
+  return [{ id: 'mock_scale', name: 'mock_scale (demo)', duration_s: DUR, state: 'ready', has_notes: true, human_edits: true, verified: mockVerified }];
 }
 export async function getMeta(){ return buildMeta(); }
-export async function getNotes(){ return JSON.parse(JSON.stringify({ ...mockDoc, rev: mockRev })); }
-export async function putNotes(id, doc){ mockRev = (doc.rev || mockRev) + 1; mockDoc = JSON.parse(JSON.stringify(doc)); mockDoc.rev = mockRev; console.log('[mock] PUT notes -> rev', mockRev, `(${(doc.notes || []).length} notes)`); return { rev: mockRev }; }
-export async function exportClip(){ return { written: ['exports/midi/mock_scale.mid', 'exports/gt/mock_scale.wav'], warnings: [] }; }
+export async function getNotes(){ return JSON.parse(JSON.stringify({ ...mockDoc, rev: mockRev, verified: mockVerified })); }
+export async function putNotes(id, doc){ mockRev = (doc.rev || mockRev) + 1; mockDoc = JSON.parse(JSON.stringify(doc)); mockDoc.rev = mockRev; if (doc.verified !== undefined) mockVerified = !!doc.verified; console.log('[mock] PUT notes -> rev', mockRev, `(${(doc.notes || []).length} notes)`); return { rev: mockRev }; }
+export async function setVerified(id, verified){ mockVerified = !!verified; mockRev += 1; return { status: 'ok', rev: mockRev, verified: mockVerified }; }
+
+let compileJob = null;
+export async function startCompile(){ compileJob = { start: performance.now() }; return { status: 'accepted' }; }
+export async function compileStatus(){
+  const root = 'Data/datasets/gt_arky';
+  if (!compileJob) return { running: false, done: 0, skipped: 0, failed: 0, current: null, total: 0, root };
+  const el = performance.now() - compileJob.start, total = 1500;
+  if (el >= total){ compileJob = null; return { running: false, done: 1, skipped: 0, failed: 0, current: null, total: 1, root }; }
+  return { running: true, done: 0, skipped: 0, failed: 0, current: 'mock_scale', total: 1, root };
+}
 
 let job = null;
 export async function processClip(id){ job = { id, start: performance.now() }; return { job_id: 'mockjob', state: 'processing' }; }

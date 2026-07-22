@@ -124,7 +124,17 @@ class VibratoParams:
 
 
 @dataclass(frozen=True)
-class ExportParams:
+class CompileParams:
+    """Knobs for ``Labeler.compile`` — the gt_arky -> standard dataset-root producer.
+
+    ``root`` is where the standard-layout root (manifest + gt/target_mel/prior_mel/
+    onsets/cond) is written; ``gt_variant`` chooses which processed wav becomes the GT
+    (``cleaned`` denoised or the ``source`` ingest). ``tempo``/``program`` shape the
+    in-memory pretty_midi the prior is rendered from (violin = program 40); ``mute_fade_ms``
+    is the cosine edge used when zeroing mute regions in the GT wav. All five participate
+    in the ``compile`` params-hash, so changing any forces a recompile.
+    """
+    root: str = "Data/datasets/gt_arky"
     gt_variant: str = "cleaned"
     tempo: float = 120.0
     program: int = 40
@@ -150,6 +160,7 @@ _STAGE_PARAMS = {
     "vibrato": ("vibrato",),
     "media": ("media",),
     "finalize": ("articulations",),
+    "compile": ("compile",),   # not a pipeline stage; keys the compile params-hash
 }
 
 # Fields that live on a param group but only affect *execution*, not the stage's
@@ -171,7 +182,7 @@ class LabelerConfig:
     transcribe: TranscribeParams = field(default_factory=TranscribeParams)
     velocity: VelocityParams = field(default_factory=VelocityParams)
     vibrato: VibratoParams = field(default_factory=VibratoParams)
-    export: ExportParams = field(default_factory=ExportParams)
+    compile: CompileParams = field(default_factory=CompileParams)
     media: MediaParams = field(default_factory=MediaParams)
     # Resolved path of the YAML this config was loaded from (None => code defaults).
     # Set by load_config; the transcribe subprocess re-loads it so the child sees the
@@ -300,7 +311,7 @@ def load_config(yaml_path: str | None = None) -> LabelerConfig:
 
     base = LabelerConfig()
     top_scalars = {"dataset_root", "port", "editing_enabled", "speeds"}
-    groups = {"denoise", "transcribe", "velocity", "vibrato", "export", "media"}
+    groups = {"denoise", "transcribe", "velocity", "vibrato", "compile", "media"}
     valid_top = top_scalars | groups | {"articulations"}
     unknown = set(doc) - valid_top
     if unknown:

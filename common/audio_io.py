@@ -11,7 +11,8 @@ import numpy as np
 import librosa
 import soundfile as sf
 
-from common.config import DEFAULT_PEAK, PCM_SUBTYPE, SR
+from common.config import (DEFAULT_PEAK, PCM_SUBTYPE, SR, TARGET_RMS_DBFS,
+                            VOICED_TOP_DB)
 
 
 def load_mono(path: str, sr: int = SR) -> np.ndarray:
@@ -38,8 +39,9 @@ def normalize(y: np.ndarray, target_peak: float = DEFAULT_PEAK) -> np.ndarray:
     return y
 
 
-def voiced_rms_normalize(y: np.ndarray, sr: int = SR, target_rms_dbfs: float = -20.0,
-                         top_db: float = 40.0,
+def voiced_rms_normalize(y: np.ndarray, sr: int = SR,
+                         target_rms_dbfs: float = TARGET_RMS_DBFS,
+                         top_db: float = VOICED_TOP_DB,
                          peak_ceiling: float = DEFAULT_PEAK) -> np.ndarray:
     """Scale ``y`` so its RMS over voiced (non-silent) segments hits ``target_rms_dbfs``.
 

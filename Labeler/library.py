@@ -161,6 +161,7 @@ class ClipInfo:
     state: str            # raw | processing | ready | error
     has_notes: bool
     human_edits: int
+    verified: bool        # human sign-off (gates Labeler.compile); missing -> False
 
 
 def _human_edit_count(notes_obj) -> int:
@@ -204,6 +205,7 @@ def get_clip_info(cfg: LabelerConfig, clip_id: str, raw_path: str | None = None)
         state=clip_state(cfg, clip_id),
         has_notes=notes_obj is not None,
         human_edits=_human_edit_count(notes_obj),
+        verified=bool(notes_obj.get("verified", False)) if isinstance(notes_obj, dict) else False,
     )
 
 

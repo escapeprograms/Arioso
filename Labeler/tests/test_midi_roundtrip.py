@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from common.config import HOP_SIZE as HOP, SR
-from DataSynthesizer.technique import note_groups_from_midi
+from common.dataset_schema import note_groups_from_midi
 from Labeler.midi_io import write_midi
 
 

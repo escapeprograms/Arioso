@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from DataSynthesizer.synthesizePrior import PB_RANGE_SEMITONES
+from common.prior import PB_RANGE_SEMITONES
 
 from .timing import beats_to_seconds
 

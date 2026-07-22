@@ -35,8 +35,6 @@ from datetime import datetime
 
 import yaml
 
-from DataSynthesizer.config import DEFAULT_OUT
-
 from .cfm import LOSSES
 from .config import (AriosoConfig, CondSpec, SIGNALS, cfg_to_dict)
 from .schedules import SCHEDULES
@@ -59,7 +57,7 @@ class RunSettings:
     Defaults match today's argparse defaults exactly, so an empty ``run:`` section (or no YAML at
     all) reproduces the current CLI behavior.
     """
-    out_dir: str = DEFAULT_OUT
+    data_roots: tuple[str, ...] = ("Data",)   # ordered dataset roots (multi-root loader)
     batch_size: int = 8
     steps: int | None = None       # total-steps cap; None -> cfg.total_steps
     log_every: int = 50
@@ -255,6 +253,19 @@ def load_config(yaml_path: str | None) -> tuple[AriosoConfig, RunSettings]:
     if "conditioning" in model_section:
         model_kw["conditioning"] = _parse_conditioning(model_section["conditioning"], yaml_path)
 
+    # Legacy back-compat: a single-root ``out_dir: X`` maps to ``data_roots: [X]`` (deprecation note).
+    # ``data_roots`` (a YAML list) is the current key; if both are present ``data_roots`` wins.
+    run_section = dict(run_section)
+    if "out_dir" in run_section:
+        legacy = run_section.pop("out_dir")
+        if not isinstance(legacy, str):
+            raise ValueError(
+                f"{yaml_path}: legacy 'out_dir' must be a single root path string, "
+                f"got {type(legacy).__name__}; use 'data_roots: [...]' for multiple roots")
+        print(f"  [run_config] 'out_dir' is deprecated; use 'data_roots: [...]'. "
+              f"Mapping out_dir={legacy!r} -> data_roots=[{legacy!r}]")
+        run_section.setdefault("data_roots", [legacy])
+
     run_kw = _apply_section(run_section, RunSettings(), yaml_path, "run")
 
     # Build AriosoConfig; turn __post_init__ AssertionError into a readable file-level error.
@@ -286,15 +297,19 @@ def merge_cli_overrides(run: RunSettings, args) -> RunSettings:
 
     Implements the CLI > YAML > defaults slice of the precedence chain. ``args`` is the argparse
     namespace whose run-level flags default to ``None`` sentinels, so an unspecified flag leaves the
-    YAML/default value untouched. ``--steps`` maps to ``steps``; ``--wandb/--no-wandb`` to ``wandb``;
-    ``--resume/--no-resume`` to ``resume``.
+    YAML/default value untouched. Repeatable ``--data-root`` maps to ``data_roots`` (a tuple);
+    ``--steps`` maps to ``steps``; ``--wandb/--no-wandb`` to ``wandb``; ``--resume/--no-resume`` to
+    ``resume``.
     """
     overrides = {}
-    for field in ("out_dir", "batch_size", "steps", "log_every", "ckpt_every",
+    for field in ("batch_size", "steps", "log_every", "ckpt_every",
                   "val_every", "device", "wandb", "name", "resume"):
         val = getattr(args, field, None)
         if val is not None:
             overrides[field] = val
+    data_roots = getattr(args, "data_roots", None)
+    if data_roots:                                       # repeatable --data-root -> tuple of roots
+        overrides["data_roots"] = tuple(data_roots)
     return dataclasses.replace(run, **overrides)
 
 

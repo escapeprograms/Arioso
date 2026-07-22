@@ -1,0 +1,26 @@
+# Conditioned multi-root run — synthetic corpus + human ground truth, all three signals ON.
+#
+# Trains over TWO dataset roots: the large synthetic corpus (Data, no conditioning tracks on disk)
+# and the Labeler's genuine ground truth (Data/datasets/gt_arky, which carries articulation /
+# velocity / vibrato tracks). The loader keys each clip by (root, basename), merges the per-root
+# held-out-piece splits, and — because the synthetic root lists none of these signals — fills its
+# clips' conditioning with the CFG "unknown" id (row num_classes) frame-for-frame, so the labelled
+# gt_arky clips supply the real per-frame signal while the synthetic bulk trains timbre unlabelled.
+#
+# Usage:  python -m Arioso.train --config Arioso/configs/conditioned_gt.yaml
+
+config_version: 1
+
+model:
+  # All three standard conditioning signals (resolved from the SIGNALS registry). The gt_arky root
+  # provides them on disk; the synthetic root falls back to the unknown fill.
+  conditioning: [articulation, velocity, vibrato]
+  lr: 2.0e-4                # peak LR after warmup
+  lr_schedule: cosine       # post-warmup anneal shape
+  lr_min: 2.0e-5            # LR floor at total_steps (10% of peak)
+  warmup_steps: 4000        # linear ramp 0 -> lr before annealing starts
+  total_steps: 40000        # modest conditioned run
+
+run:
+  data_roots: [Data, Data/datasets/gt_arky]   # synthetic corpus + human ground truth
+  name: arioso_conditioned_gt

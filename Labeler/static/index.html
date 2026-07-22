@@ -51,6 +51,10 @@
         </label>
       </div>
 
+      <button id="btn-verified" class="verified-toggle" title="Mark this clip verified (gates dataset compile)" hidden>
+        <span class="glyph">&#10003;</span><span class="lbl">Verified</span>
+      </button>
+
       <div class="save-ind" id="save-ind" title="Save state">
         <span class="dot"></span><span class="txt">saved</span>
       </div>
@@ -61,6 +65,10 @@
     <aside class="sidebar">
       <div class="sidebar-head">Clips</div>
       <ul class="clip-list" id="clip-list"></ul>
+      <div class="sidebar-compile">
+        <button class="compile-btn" id="btn-compile" title="Compile all verified clips into the dataset root">Compile dataset</button>
+        <div class="compile-status" id="compile-status" hidden></div>
+      </div>
       <div class="sidebar-progress" id="sidebar-progress" hidden>
         <div class="pmsg" id="pmsg">processing&hellip;</div>
         <div class="pbar"><div class="pfill" id="pfill"></div></div>

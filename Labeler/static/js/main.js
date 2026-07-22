@@ -38,6 +38,7 @@ async function boot(){
 
   buildTechDropdown();
   wireTransport();
+  wireCompile();
   wireModal();
   wireOrphan();
   subscribe(onStoreChange);
@@ -111,6 +112,8 @@ const actions = {
   selectNext(){ const n = store.selectedId ? nextNote(store.selectedId) : firstNote(); if (n) select(n.id, { playhead: n.start_s }); },
   velUp(){ if (store.selectedId){ const n = noteById(store.selectedId); apply(edit.setVelocity(store.selectedId, n.velocity + 5)); } },
   velDown(){ if (store.selectedId){ const n = noteById(store.selectedId); apply(edit.setVelocity(store.selectedId, n.velocity - 5)); } },
+  pitchUp(){ if (editing() && store.selectedId) apply(edit.moveNote(store.selectedId, 0, +1)); },
+  pitchDown(){ if (editing() && store.selectedId) apply(edit.moveNote(store.selectedId, 0, -1)); },
   undo(){ undo(); }, redo(){ redo(); },
   speedDown(){ changeSpeed(-1); }, speedUp(){ changeSpeed(+1); },
   toggleMuteOrig(){ player.toggleMute('orig'); syncTransport(); },
@@ -120,6 +123,7 @@ const actions = {
   playPause(){ playPause(); },
   deleteSelected(){ if (editing() && store.selectedId) apply(edit.deleteNote(store.selectedId)); },
   splitAtPlayhead(){ if (editing() && store.selectedId){ const c = edit.splitNote(store.selectedId, store.playhead); if (c) apply(c); } },
+  splitAllAtPlayhead(){ if (editing()){ const c = edit.splitAllAt(store.playhead); if (c) apply(c); } },
   togglePaintRegion(){ store.paintMode = !store.paintMode; $('region-popover').hidden = !store.paintMode; if (store.paintMode) renderRegionList(); requestStatic(); },
   deselect(){ deselect(); },
 };
@@ -226,6 +230,69 @@ function wireTransport(){
   $('insp-tech').onchange = (e) => { if (store.selectedId) apply(edit.setTechnique(store.selectedId, e.target.value)); };
   $('insp-vib').onchange = (e) => { if (store.selectedId) apply(edit.setFields(store.selectedId, { vibrato: e.target.checked, 'human.vibrato': true }, { label: 'vibrato' })); };
   $('region-pop-close').onclick = () => { store.paintMode = false; $('region-popover').hidden = true; };
+  $('btn-verified').onclick = () => toggleVerified();
+}
+
+// ---------------- verified flag ----------------
+async function toggleVerified(){
+  if (!store.doc || store.clipId == null) return;
+  const target = !store.doc.verified;
+  try {
+    const res = await api.setVerified(store.clipId, target);
+    // Update BOTH verified and rev so the next full-doc PUT does not 409.
+    store.doc.verified = res.verified;
+    if (res.rev != null) store.doc.rev = res.rev;
+    const clip = store.clips.find((c) => c.id === store.clipId);
+    if (clip) clip.verified = res.verified;
+    renderSidebar();
+    syncVerifiedBtn();
+  } catch (err) { recordError('verified: ' + err); }
+}
+
+function syncVerifiedBtn(){
+  const b = $('btn-verified');
+  const on = !!(store.doc && store.doc.verified);
+  b.hidden = !store.doc;
+  b.classList.toggle('on', on);
+  b.querySelector('.lbl').textContent = on ? 'Verified' : 'Unverified';
+}
+
+// ---------------- compile dataset ----------------
+let compileTimer = null;
+function wireCompile(){
+  $('btn-compile').onclick = () => startCompile();
+}
+async function startCompile(){
+  try { await api.startCompile(); }
+  catch (err) {
+    if (err instanceof api.ApiError && err.status === 409) showCompileStatus({ running: true });
+    else recordError('compile: ' + err);
+    return;
+  }
+  pollCompile();
+}
+function pollCompile(){
+  clearInterval(compileTimer);
+  $('btn-compile').disabled = true;
+  compileTimer = setInterval(async () => {
+    let st; try { st = await api.compileStatus(); } catch { clearInterval(compileTimer); $('btn-compile').disabled = false; return; }
+    showCompileStatus(st);
+    if (!st.running){
+      clearInterval(compileTimer);
+      $('btn-compile').disabled = false;
+      try { store.clips = await api.getClips(); renderSidebar(); } catch {}
+    }
+  }, 700);
+}
+function showCompileStatus(st){
+  const el = $('compile-status'); el.hidden = false;
+  if (st.running){
+    const n = st.total || 0, k = (st.done || 0) + (st.skipped || 0) + (st.failed || 0);
+    el.textContent = `compiling ${st.current || ''} (${k}/${n})…`;
+  } else {
+    el.textContent = `done: ${st.done || 0} built, ${st.skipped || 0} skipped` +
+      (st.failed ? `, ${st.failed} failed` : '');
+  }
 }
 
 function wireModal(){
@@ -280,6 +347,7 @@ function renderSidebar(){
       `<div class="clip-row"><span class="clip-name">${esc(c.name || c.id)}</span><span class="badge ${c.state}">${c.state}</span></div>` +
       `<div class="clip-sub"><span>${c.duration_s ? c.duration_s.toFixed(1) + 's' : ''}</span>` +
       `${c.human_edits ? '<span class="clip-edits">&#9998; edits</span>' : ''}` +
+      `${c.verified ? '<span class="clip-verified">&#10003; verified</span>' : ''}` +
       `<span class="spacer" style="flex:1"></span>` +
       `<button class="pbtn">${c.state === 'raw' ? 'process' : 'reprocess'}</button></div>`;
     li.querySelector('.clip-row').onclick = () => loadClip(c.id);
@@ -321,6 +389,7 @@ function onStoreChange(){
   updateSaveInd();
   updateSidebarActive();
   syncTransport();
+  syncVerifiedBtn();
   if (store.paintMode) renderRegionList();   // keep the mute-region popover in sync
 }
 

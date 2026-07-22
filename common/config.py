@@ -1,9 +1,12 @@
 """Canonical audio constants shared across the Arioso project.
 
 Single source of truth for values that every package must agree on — most
-importantly the sample rate, since training must read audio at the exact rate
-the dataset was written at. Pipeline-specific constants do **not** belong here
-(see ``DataSynthesizer/config.py``).
+importantly the sample rate (training must read audio at the exact rate the
+dataset was written at), the mel contract, and the cross-producer loudness
+contract (``TARGET_RMS_DBFS`` / ``VOICED_TOP_DB``, shared by every GT
+normalization and the prior's masked-RMS level match). Truly pipeline-only
+constants (e.g. ``BOOKS``, book paths) stay in ``DataSynthesizer/config.py``;
+the prior-shape knobs live in ``common/prior.py``.
 """
 
 from __future__ import annotations
@@ -12,6 +15,16 @@ from __future__ import annotations
 SR = 44100          # sample rate (Hz)
 DEFAULT_PEAK = 0.95  # default peak for audio_io.normalize (avoids clipping)
 PCM_SUBTYPE = "PCM_16"
+
+# --- Cross-producer loudness contract -----------------------------------
+# Every GT wav (whatever its source — YouTube rips for the synthetic corpus, the
+# Labeler's recorded clips) is scaled so its RMS over voiced (non-silent) segments
+# hits TARGET_RMS_DBFS, equalizing playing loudness across recordings. Measuring
+# only over voiced segments keeps rests from dragging the level down. The Arioso
+# prior is masked-RMS level-matched to the SAME TARGET_RMS_DBFS so prior/target
+# levels agree (see common.prior.MaskedRMS, common.audio_io.voiced_rms_normalize).
+TARGET_RMS_DBFS = -20.0   # voiced-RMS target for every GT track (dBFS)
+VOICED_TOP_DB = 40.0      # librosa.effects.split: dB below peak counted as silence
 
 # --- Mel-spectrogram contract -------------------------------------------
 # These MUST match the BigVGAN-v2 vocoder checkpoint

@@ -12,31 +12,38 @@ target mels (memory-mapped, no audio re-windowing). Clips are variable length, s
 from __future__ import annotations
 
 import functools
-import os
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, Sampler
 
-from .clips import Clip, enumerate_clips
-from .config import PRIOR_MEL_DIR, AriosoConfig, CondSpec
-from .splits import make_split
+from common.dataset_schema import DatasetRoot
+
+from .clips import Clip, _basenames_per_root, enumerate_clips, open_roots
+from .config import AriosoConfig, CondSpec
+from .splits import make_splits
 
 
 class AriosoDataset(Dataset):
-    """Returns ``(x0, x1)`` prior/target mel slices for a fixed clip pool.
+    """Returns ``(x0, x1)`` prior/target mel slices for a fixed clip pool over multiple roots.
+
+    Each :class:`~Arioso.clips.Clip` carries a ``root`` index into ``roots`` (the ordered
+    :class:`~common.dataset_schema.DatasetRoot` list); prior/target mel paths come from that root's
+    accessors, so a basename shared by two roots never collides.
 
     When ``specs`` is non-empty each item also carries a ``"cond"`` dict mapping each spec name to
-    that clip's ``[T]`` int64 per-frame id track (mmap-sliced identically to the mels). With no
-    specs the item dict is exactly as before (no ``"cond"`` key).
+    that clip's ``[T]`` int64 per-frame id track (mmap-sliced identically to the mels). A signal the
+    clip's root does *not* provide (``spec.name not in root.signals``) is filled with the CFG
+    "unknown" id (``spec.num_classes`` — one past the last class, always in-range because the
+    embedding table has ``num_classes + 1`` rows). With no specs the item dict is exactly as before
+    (no ``"cond"`` key).
     """
 
-    def __init__(self, out_dir: str, clips: list[Clip], specs: tuple[CondSpec, ...] = ()):
-        self.out_dir = out_dir
+    def __init__(self, roots: list[DatasetRoot], clips: list[Clip],
+                 specs: tuple[CondSpec, ...] = ()):
+        self.roots = roots
         self.clips = clips
         self.specs = tuple(specs)
-        self.prior_dir = os.path.join(out_dir, PRIOR_MEL_DIR)
-        self.target_dir = os.path.join(out_dir, "target_mel")
 
     def __len__(self) -> int:
         return len(self.clips)
@@ -46,10 +53,9 @@ class AriosoDataset(Dataset):
 
     def __getitem__(self, i: int) -> dict:
         c = self.clips[i]
-        x0 = np.load(os.path.join(self.prior_dir, c.basename + ".npy"),
-                     mmap_mode="r")[:, c.start:c.end]
-        x1 = np.load(os.path.join(self.target_dir, c.basename + ".npy"),
-                     mmap_mode="r")[:, c.start:c.end]
+        root = self.roots[c.root]
+        x0 = np.load(root.prior_mel_path(c.basename), mmap_mode="r")[:, c.start:c.end]
+        x1 = np.load(root.target_mel_path(c.basename), mmap_mode="r")[:, c.start:c.end]
         item = {
             "x0": torch.from_numpy(np.ascontiguousarray(x0, dtype=np.float32)),
             "x1": torch.from_numpy(np.ascontiguousarray(x1, dtype=np.float32)),
@@ -58,10 +64,14 @@ class AriosoDataset(Dataset):
         if self.specs:
             cond = {}
             for spec in self.specs:
-                arr = np.load(os.path.join(self.out_dir, spec.dir, c.basename + ".npy"),
-                              mmap_mode="r")[c.start:c.end]
-                cond[spec.name] = torch.from_numpy(
-                    np.ascontiguousarray(arr).astype(np.int64))
+                if spec.name not in root.signals:
+                    # Root lacks this signal -> the CFG "unknown" row (in-range: num_classes+1 rows).
+                    arr = np.full(c.end - c.start, spec.num_classes, dtype=np.int64)
+                else:
+                    arr = np.load(root.cond_path(spec.name, c.basename),
+                                  mmap_mode="r")[c.start:c.end]
+                    arr = np.ascontiguousarray(arr).astype(np.int64)
+                cond[spec.name] = torch.from_numpy(arr)
             item["cond"] = cond
         return item
 
@@ -129,19 +139,26 @@ def collate(batch: list[dict], specs: tuple[CondSpec, ...] = ()) -> dict:
     return out
 
 
-def build_dataloader(out_dir: str, split_name: str, batch_size: int,
+def build_dataloader(data_roots, split_name: str, batch_size: int,
                      cfg: AriosoConfig | None = None, shuffle: bool = True,
                      num_workers: int = 0) -> DataLoader:
-    """DataLoader over the clip pool for a split ('train'|'val'), length-bucketed + masked.
+    """DataLoader over the multi-root clip pool for a split ('train'|'val'), length-bucketed + masked.
 
-    Conditioning (``cfg.conditioning``) flows through: the dataset loads each spec's id track and
-    ``collate`` (bound to the specs via ``functools.partial``, kept picklable for num_workers>0)
-    packs it into ``batch["cond"]``.
+    ``data_roots`` is the ordered list of root path strings; a :class:`DatasetRoot` is constructed
+    once per root here (loading/validating each ``manifest.json``). The per-root splits are merged
+    (``make_splits``) and enumerated (``enumerate_clips``) preserving root order, so a clip's ``root``
+    index keys the right :class:`DatasetRoot` in the dataset.
+
+    Conditioning (``cfg.conditioning``) flows through: the dataset loads each spec's id track (or the
+    unknown fill for a root lacking that signal) and ``collate`` (bound to the specs via
+    ``functools.partial``, kept picklable for num_workers>0) packs it into ``batch["cond"]``.
     """
     cfg = cfg or AriosoConfig()
-    split = make_split(out_dir, cfg)
-    clips = enumerate_clips(out_dir, split[split_name], cfg)
-    ds = AriosoDataset(out_dir, clips, specs=cfg.conditioning)
+    roots = open_roots(list(data_roots))
+    split = make_splits(roots, cfg)
+    per_root = _basenames_per_root(roots, split[split_name])
+    clips = enumerate_clips(roots, per_root, cfg)
+    ds = AriosoDataset(roots, clips, specs=cfg.conditioning)
     sampler = LengthBucketBatchSampler(ds.lengths(), batch_size, shuffle=shuffle, seed=cfg.seed)
     collate_fn = functools.partial(collate, specs=cfg.conditioning)
     loader = DataLoader(ds, batch_sampler=sampler, collate_fn=collate_fn, num_workers=num_workers)

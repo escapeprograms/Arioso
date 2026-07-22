@@ -29,7 +29,9 @@ export const getStatus  = (id)             => MOCK ? mock.getStatus(id)        :
 export const getNotes   = (id)             => MOCK ? mock.getNotes(id)         : j('GET', `/api/clips/${id}/notes`);
 export const putNotes   = (id, doc)        => MOCK ? mock.putNotes(id, doc)    : j('PUT', `/api/clips/${id}/notes`, doc);
 export const processClip= (id, opts = {})  => MOCK ? mock.processClip(id, opts): j('POST', `/api/clips/${id}/process`, opts);
-export const exportClip = (id, opts = {})  => MOCK ? mock.exportClip(id, opts) : j('POST', `/api/clips/${id}/export`, opts);
+export const setVerified= (id, verified)   => MOCK ? mock.setVerified(id, verified) : j('POST', `/api/clips/${id}/verified`, { verified });
+export const startCompile= ()              => MOCK ? mock.startCompile()        : j('POST', '/api/compile', {});
+export const compileStatus= ()             => MOCK ? mock.compileStatus()       : j('GET', '/api/compile/status');
 
 // sendBeacon alias (POST /notes) for beforeunload flushes
 export function beaconNotes(id, doc){
