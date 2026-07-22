@@ -23,7 +23,8 @@ from scipy.fft import dct
 
 from common.dataset_schema import DatasetRoot
 
-from ..config import cfg_from_dict
+from ..config import BoundaryCondSpec, cfg_from_dict
+from ..dataset import boundary_distances
 from ..infer import generate_mel
 from ..model import AriosoModel
 from ..splits import make_split
@@ -95,13 +96,24 @@ def main() -> None:
         prior = np.load(pp).astype(np.float32)
         target = np.load(tp).astype(np.float32)
 
-        # Per-frame conditioning id tracks on the prior mel's frame grid (no slicing before
-        # generate_mel). A signal this root lacks gets the CFG "unknown" fill (spec.num_classes),
-        # mirroring the training dataset's unknown-fill so conditioned eval on an unlabelled root
-        # still runs; on-disk tracks are read for signals the root provides.
+        # Per-frame conditioning tracks on the prior mel's frame grid (no slicing before
+        # generate_mel). Categorical: a signal this root lacks gets the CFG "unknown" fill
+        # (spec.num_classes), mirroring the training dataset's unknown-fill so conditioned eval on an
+        # unlabelled root still runs; on-disk tracks are read for signals the root provides. Boundary
+        # (mirrors Arioso.dataset:110-120): the root's onsets/offsets array over the full-recording
+        # window -> per-frame distance; a missing array yields the all -1 (inactive) sentinel track.
         cond_frames = {}
         for spec in cfg.conditioning:
-            if spec.name not in root.signals:
+            if isinstance(spec, BoundaryCondSpec):
+                path = (root.onsets_path(base) if spec.boundary == "onset"
+                        else root.offsets_path(base))
+                if not os.path.isfile(path):
+                    cond_frames[spec.name] = np.full(prior.shape[-1], -1, dtype=np.int64)
+                else:
+                    bounds = np.load(path).astype(np.int64)
+                    cond_frames[spec.name] = boundary_distances(
+                        bounds, 0, prior.shape[-1], spec.direction)
+            elif spec.name not in root.signals:
                 cond_frames[spec.name] = np.full(prior.shape[-1], spec.num_classes, dtype=np.int64)
             else:
                 cond_frames[spec.name] = np.load(root.cond_path(spec.name, base))[:prior.shape[-1]]

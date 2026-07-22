@@ -11,14 +11,22 @@ renderer). Only Arioso-specific model/training knobs live here.
 Defaults are the **spec baseline** (``SPEC_Arioso_v1_baseline.md``); every deferred or
 out-of-scope feature is a toggle that defaults OFF so the baseline is the default run.
 
-**Per-frame conditioning** (``CondSpec`` + ``AriosoConfig.conditioning``): the three standard
-signals — articulation, velocity, vibrato — are each optional per dataset root and resolved from
-the ``SIGNALS`` registry. ``AriosoConfig.conditioning`` defaults to ``()`` (the main synthetic
-corpus carries no labels); a labelled root opts in via ``conditioning: [articulation, velocity,
-vibrato]``. Classifier-free-guidance dropout (``cond_dropout``) is a deferred toggle and defaults
-**OFF**. Checkpoints embed the config via ``cfg_to_dict`` / ``cfg_from_dict`` (plain dicts only, so
-``torch.load(weights_only=True)`` under torch 2.6 stays safe, and pre-conditioning checkpoints
-reconstruct the exact old architecture).
+**Per-frame conditioning** (``AriosoConfig.conditioning``) comes in two kinds, both per-frame and
+both embedded then concatenated to ``[x_t, x_0]`` before the input projection:
+
+* **Categorical** (``CondSpec``): the three standard signals — articulation, velocity, vibrato —
+  each a ``[T]`` id track embedded via a lookup table, optional per dataset root, resolved from the
+  ``SIGNALS`` registry.
+* **Sinusoidal boundary distance** (``BoundaryCondSpec``): a continuous per-frame distance to the
+  nearest note boundary (time since onset / time until offset), sinusoidally featurized over a
+  compact support window and zero outside it; resolved from the ``BOUNDARY_SIGNALS`` registry.
+
+``AriosoConfig.conditioning`` defaults to ``()`` (the main synthetic corpus carries no labels); a
+labelled root opts in via ``conditioning: [articulation, velocity, vibrato, time_since_onset,
+time_until_offset]``. Classifier-free-guidance dropout (``cond_dropout``) is a deferred toggle and
+defaults **OFF**. Checkpoints embed the config via ``cfg_to_dict`` / ``cfg_from_dict`` (plain dicts
+only, so ``torch.load(weights_only=True)`` under torch 2.6 stays safe, and pre-conditioning
+checkpoints reconstruct the exact old architecture).
 """
 
 from __future__ import annotations
@@ -81,6 +89,55 @@ SIGNALS: dict[str, CondSpec] = {
 
 
 @dataclass(frozen=True)
+class BoundaryCondSpec:
+    """One per-frame *continuous* conditioning signal: sinusoidal distance to a note boundary.
+
+    Where a :class:`CondSpec` embeds a categorical id per frame, this signal encodes a real-valued
+    distance (in frames) from each frame to the nearest note boundary — the onset it follows
+    (``direction="since"``) or the offset it precedes (``direction="until"``). The dataset turns the
+    root's ``onsets/`` / ``offsets/`` frame arrays into a per-frame distance track (sentinel ``-1``
+    where no boundary is in range); :class:`~Arioso.model.conditioning.BoundarySinusoid` featurizes
+    it with sin/cos over a geometric frequency band (like the flow-time embedding).
+
+    **Compact support.** The signal is active only within ``window_ms`` of the boundary; a frame
+    farther away (or the ``-1`` sentinel) maps to the exact **zero vector**, so there is no
+    "unknown" class and no ``num_classes`` / ``pad_id`` — inactivity is representable natively (batch
+    padding uses ``-1``). This makes it a smooth, local attack/decay-shaped cue rather than a global
+    ramp.
+
+    The 50 ms default mirrors the legacy ``DataSynthesizer`` ``ONSET_DECAY_MS`` — the width of the
+    old scalar onset-emphasis mask this per-frame signal supersedes. It is a **deliberate literal**,
+    not an import: producers (DataSynthesizer / Labeler) and consumers (Arioso) never cross-import,
+    so the provenance is documented here rather than coupled by reference.
+
+    Fields:
+        name:       unique signal name (registry key + cond-dict key).
+        emb_dim:    output width per frame; ``emb_dim // 2`` sin + ``emb_dim // 2`` cos (must be even).
+        boundary:   which per-root frame array feeds the distance — ``"onset"`` or ``"offset"``.
+        direction:  ``"since"`` (frame - previous boundary) or ``"until"`` (next boundary - frame).
+        window_ms:  compact-support half-life X in milliseconds (distance normalizer; active window).
+    """
+    name: str
+    emb_dim: int = 64          # 32 sin + 32 cos; must be even
+    boundary: str = "onset"    # which per-root artifact array: "onset" | "offset"
+    direction: str = "since"   # "since" (frame - prev boundary) | "until" (next boundary - frame)
+    window_ms: float = 50.0    # X: compact support in ms; default = legacy DataSynthesizer ONSET_DECAY_MS
+
+
+# Boundary-signal registry: name -> canonical BoundarySinusoid spec (mirrors SIGNALS). The two
+# standard signals bracket a note — "time since its onset" and "time until its offset" — each a
+# compact 50 ms attack/decay-shaped cue resolved by the run-config loader.
+TIME_SINCE_ONSET = BoundaryCondSpec("time_since_onset", emb_dim=64, boundary="onset",
+                                    direction="since", window_ms=50.0)
+TIME_UNTIL_OFFSET = BoundaryCondSpec("time_until_offset", emb_dim=64, boundary="offset",
+                                     direction="until", window_ms=50.0)
+BOUNDARY_SIGNALS: dict[str, BoundaryCondSpec] = {
+    "time_since_onset": TIME_SINCE_ONSET,
+    "time_until_offset": TIME_UNTIL_OFFSET,
+}
+
+
+@dataclass(frozen=True)
 class AriosoConfig:
     """Everything that defines an Arioso run. Spec-baseline defaults."""
 
@@ -107,10 +164,12 @@ class AriosoConfig:
     dit_head_dim: int = 64           # heads * head_dim == hidden (6*64 == 384)
     dit_ffn: int = 1536
     rope_base: float = 10000.0
-    # Per-frame conditioning: one CondSpec per categorical signal, embedded and concatenated to
-    # [x_t, x_0] before in_proj. Defaults to () — the main synthetic corpus carries no labels; a
-    # labelled root opts in via ``conditioning: [articulation, velocity, vibrato]``.
-    conditioning: tuple[CondSpec, ...] = ()
+    # Per-frame conditioning: a mix of categorical CondSpecs (embedding-table id tracks) and
+    # continuous BoundaryCondSpecs (sinusoidal note-boundary distance), each embedded and
+    # concatenated to [x_t, x_0] before in_proj. Defaults to () — the main synthetic corpus carries
+    # no labels; a labelled root opts in via
+    # ``conditioning: [articulation, velocity, vibrato, time_since_onset, time_until_offset]``.
+    conditioning: tuple[CondSpec | BoundaryCondSpec, ...] = ()
     # CFG lever (deferred, OFF): fraction of samples whose ENTIRE conditioning is swapped for the
     # per-spec "unknown" id (row num_classes) during training. See model.conditioning.
     cond_dropout: float = 0.0
@@ -177,13 +236,25 @@ class AriosoConfig:
         assert len(self.dilations) == self.wn_blocks, \
             "dilation cycle * repeats must equal wn_blocks"
         assert self.in_ch == 2 * self.n_mels, "in_ch must be 2 * n_mels ([x_t, x_0])"
-        # Conditioning invariants: unique names, valid embed dims / pad ids, valid dropout.
+        # Conditioning invariants: unique names across BOTH kinds, then per-kind checks.
         names = [spec.name for spec in self.conditioning]
         assert len(names) == len(set(names)), f"conditioning spec names must be unique: {names}"
         for spec in self.conditioning:
-            assert spec.emb_dim > 0, f"conditioning spec {spec.name!r} emb_dim must be > 0"
-            assert 0 <= spec.pad_id < spec.num_classes, \
-                f"conditioning spec {spec.name!r} pad_id must be in [0, num_classes)"
+            if isinstance(spec, CondSpec):
+                # Categorical: positive even-free emb dim + an in-range pad id.
+                assert spec.emb_dim > 0, f"conditioning spec {spec.name!r} emb_dim must be > 0"
+                assert 0 <= spec.pad_id < spec.num_classes, \
+                    f"conditioning spec {spec.name!r} pad_id must be in [0, num_classes)"
+            else:
+                # Boundary: sin/cos split needs an even, positive emb dim + a positive window;
+                # boundary/direction must name a real array and distance sign.
+                assert spec.emb_dim > 0 and spec.emb_dim % 2 == 0, \
+                    f"boundary spec {spec.name!r} emb_dim must be even and > 0 (sin+cos halves)"
+                assert spec.window_ms > 0.0, f"boundary spec {spec.name!r} window_ms must be > 0"
+                assert spec.boundary in {"onset", "offset"}, \
+                    f"boundary spec {spec.name!r} boundary must be 'onset' or 'offset'"
+                assert spec.direction in {"since", "until"}, \
+                    f"boundary spec {spec.name!r} direction must be 'since' or 'until'"
         assert 0.0 <= self.cond_dropout < 1.0, "cond_dropout must be in [0.0, 1.0)"
         # Off-path augmentation invariants.
         assert 0.0 <= self.path_aug_p <= 1.0, "path_aug_p must be in [0.0, 1.0]"
@@ -215,17 +286,22 @@ def cfg_from_dict(d: dict) -> AriosoConfig:
     are dropped). A missing ``conditioning`` key becomes ``()`` so pre-conditioning checkpoints
     reconstruct the exact old (no-conditioning) architecture. List-typed tuple fields
     (``wn_dilation_cycle``, ``conditioning``) are coerced back to tuples, and each conditioning
-    entry is rebuilt into a ``CondSpec`` (dicts are expanded; existing CondSpec instances pass
-    through).
+    entry is rebuilt into its spec: an existing ``CondSpec`` / ``BoundaryCondSpec`` passes through;
+    a dict is a ``CondSpec`` when it carries ``num_classes`` (the categorical discriminator) else a
+    ``BoundaryCondSpec`` — so a mixed conditioning tuple round-trips through ``cfg_to_dict``.
     """
     field_names = {f.name for f in dataclasses.fields(AriosoConfig)}
     kw = {k: v for k, v in d.items() if k in field_names}
 
     # A pre-conditioning checkpoint has no "conditioning" key -> the old architecture had none.
     specs = kw.get("conditioning", ())
-    kw["conditioning"] = tuple(
-        s if isinstance(s, CondSpec) else CondSpec(**s) for s in specs
-    )
+
+    def _rebuild(s):
+        if isinstance(s, (CondSpec, BoundaryCondSpec)):
+            return s
+        return CondSpec(**s) if "num_classes" in s else BoundaryCondSpec(**s)
+
+    kw["conditioning"] = tuple(_rebuild(s) for s in specs)
     if "wn_dilation_cycle" in kw:
         kw["wn_dilation_cycle"] = tuple(kw["wn_dilation_cycle"])
     return AriosoConfig(**kw)

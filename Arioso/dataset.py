@@ -12,6 +12,7 @@ target mels (memory-mapped, no audio re-windowing). Clips are variable length, s
 from __future__ import annotations
 
 import functools
+import os
 
 import numpy as np
 import torch
@@ -20,8 +21,35 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 from common.dataset_schema import DatasetRoot
 
 from .clips import Clip, _basenames_per_root, enumerate_clips, open_roots
-from .config import AriosoConfig, CondSpec
+from .config import AriosoConfig, BoundaryCondSpec, CondSpec
 from .splits import make_splits
+
+
+def boundary_distances(arr: np.ndarray, start: int, end: int, direction: str) -> np.ndarray:
+    """Per-frame distance (in frames) from clip frames ``[start, end)`` to the nearest boundary.
+
+    ``arr`` is a root's ``onsets``/``offsets`` array — ``[K]`` **absolute** (whole-recording) frame
+    indices, sorted and unique. For each frame ``f`` in the clip window:
+
+    * ``direction="since"`` -> ``f - (greatest boundary <= f)``: distance behind, 0 on the boundary
+      frame. A boundary *before* the clip start still counts (distances stay absolute-frame based).
+    * ``direction="until"`` -> ``(least boundary >= f) - f``: distance ahead, 0 on the boundary frame.
+
+    Frames with no boundary on the required side (before the first onset / after the last offset,
+    or an empty ``arr``) get the sentinel ``-1``. Returns ``[end - start]`` int64. This is the pure
+    core of the "time since onset" / "time until offset" signal; :class:`BoundarySinusoid`
+    featurizes it and applies the compact-support window.
+    """
+    frames = np.arange(start, end, dtype=np.int64)
+    if arr.size == 0:
+        return np.full(frames.shape, -1, dtype=np.int64)
+    if direction == "since":
+        idx = np.searchsorted(arr, frames, side="right") - 1
+        d = np.where(idx >= 0, frames - arr[np.clip(idx, 0, None)], -1)
+    else:
+        idx = np.searchsorted(arr, frames, side="left")
+        d = np.where(idx < arr.size, arr[np.clip(idx, None, arr.size - 1)] - frames, -1)
+    return d.astype(np.int64)
 
 
 class AriosoDataset(Dataset):
@@ -32,15 +60,21 @@ class AriosoDataset(Dataset):
     accessors, so a basename shared by two roots never collides.
 
     When ``specs`` is non-empty each item also carries a ``"cond"`` dict mapping each spec name to
-    that clip's ``[T]`` int64 per-frame id track (mmap-sliced identically to the mels). A signal the
-    clip's root does *not* provide (``spec.name not in root.signals``) is filled with the CFG
-    "unknown" id (``spec.num_classes`` — one past the last class, always in-range because the
-    embedding table has ``num_classes + 1`` rows). With no specs the item dict is exactly as before
-    (no ``"cond"`` key).
+    that clip's ``[T]`` int64 per-frame track. The two spec kinds fill it differently:
+
+    * **Categorical** (:class:`~Arioso.config.CondSpec`): the on-disk ``[T]`` id track (mmap-sliced
+      identically to the mels). A signal the clip's root does *not* provide (``spec.name not in
+      root.signals``) is filled with the CFG "unknown" id (``spec.num_classes`` — one past the last
+      class, always in-range because the embedding table has ``num_classes + 1`` rows).
+    * **Boundary** (:class:`~Arioso.config.BoundaryCondSpec`): a per-frame distance track derived
+      from the root's ``onsets``/``offsets`` array via :func:`boundary_distances` (sentinel ``-1``).
+      A root missing that array (or an empty one) yields all ``-1`` (the inactive/zero state).
+
+    With no specs the item dict is exactly as before (no ``"cond"`` key).
     """
 
     def __init__(self, roots: list[DatasetRoot], clips: list[Clip],
-                 specs: tuple[CondSpec, ...] = ()):
+                 specs: tuple[CondSpec | BoundaryCondSpec, ...] = ()):
         self.roots = roots
         self.clips = clips
         self.specs = tuple(specs)
@@ -64,14 +98,26 @@ class AriosoDataset(Dataset):
         if self.specs:
             cond = {}
             for spec in self.specs:
-                if spec.name not in root.signals:
-                    # Root lacks this signal -> the CFG "unknown" row (in-range: num_classes+1 rows).
-                    arr = np.full(c.end - c.start, spec.num_classes, dtype=np.int64)
+                if isinstance(spec, CondSpec):
+                    if spec.name not in root.signals:
+                        # Root lacks this signal -> CFG "unknown" row (in-range: num_classes+1 rows).
+                        arr = np.full(c.end - c.start, spec.num_classes, dtype=np.int64)
+                    else:
+                        arr = np.load(root.cond_path(spec.name, c.basename),
+                                      mmap_mode="r")[c.start:c.end]
+                        arr = np.ascontiguousarray(arr).astype(np.int64)
+                    cond[spec.name] = torch.from_numpy(arr)
                 else:
-                    arr = np.load(root.cond_path(spec.name, c.basename),
-                                  mmap_mode="r")[c.start:c.end]
-                    arr = np.ascontiguousarray(arr).astype(np.int64)
-                cond[spec.name] = torch.from_numpy(arr)
+                    # Boundary signal: absolute-frame onset/offset array -> per-frame distance track.
+                    path = (root.onsets_path(c.basename) if spec.boundary == "onset"
+                            else root.offsets_path(c.basename))
+                    if not os.path.isfile(path):
+                        # Root lacks the boundary array -> inactive everywhere (all -1 sentinel).
+                        d = np.full(c.end - c.start, -1, dtype=np.int64)
+                    else:
+                        bounds = np.load(path).astype(np.int64)   # [K] absolute frames, sorted-unique
+                        d = boundary_distances(bounds, c.start, c.end, spec.direction)
+                    cond[spec.name] = torch.from_numpy(d)
             item["cond"] = cond
         return item
 
@@ -107,12 +153,14 @@ class LengthBucketBatchSampler(Sampler):
         return len(self.batches)
 
 
-def collate(batch: list[dict], specs: tuple[CondSpec, ...] = ()) -> dict:
+def collate(batch: list[dict], specs: tuple[CondSpec | BoundaryCondSpec, ...] = ()) -> dict:
     """Pad a batch to its max length; return tensors + a ``[B, T]`` frame mask (1 real / 0 pad).
 
-    When ``specs`` is non-empty, also pack each spec's per-frame id track into ``out["cond"]``:
-    ``[B, T_max]`` long, initialized to the spec's ``pad_id`` and filled per item (the pad frames
-    are masked out by ``frame_mask`` anyway; ``pad_id`` just keeps them a valid embedding index).
+    When ``specs`` is non-empty, also pack each spec's per-frame track into ``out["cond"]``:
+    ``[B, T_max]`` long, filled per item. The pad value depends on the spec kind — a categorical
+    :class:`~Arioso.config.CondSpec` pads with its ``pad_id`` (a valid embedding index), a boundary
+    :class:`~Arioso.config.BoundaryCondSpec` pads with ``-1`` (its inactive sentinel). Either way
+    the pad frames are masked out by ``frame_mask``, so the value only needs to stay in-range.
     """
     n_mels = batch[0]["x0"].shape[0]
     lengths = torch.tensor([b["length"] for b in batch], dtype=torch.long)
@@ -130,7 +178,8 @@ def collate(batch: list[dict], specs: tuple[CondSpec, ...] = ()) -> dict:
     if specs:
         cond = {}
         for spec in specs:
-            packed = torch.full((b, t_max), spec.pad_id, dtype=torch.long)
+            pad_value = spec.pad_id if isinstance(spec, CondSpec) else -1
+            packed = torch.full((b, t_max), pad_value, dtype=torch.long)
             for i, item in enumerate(batch):
                 ln = item["length"]
                 packed[i, :ln] = item["cond"][spec.name]

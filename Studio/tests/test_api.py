@@ -42,7 +42,7 @@ def test_get_config(client):
     names = [a["name"] for a in body["articulations"]]
     assert names == ["normal", "slur", "spiccato", "detache"]
     assert body["technique_model_vocab"]["spiccato"] == "spiccato"
-    assert body["technique_model_vocab"]["slur"] == "normal"
+    assert body["technique_model_vocab"]["slur"] == "slur"
     assert any(o["id"] == "step" for o in body["snap_options"])
 
 

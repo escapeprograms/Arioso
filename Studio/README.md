@@ -53,8 +53,8 @@ torch-free).
 Per project: `{schema_version, project_id, rev (monotonic, optimistic-lock), next_note_ordinal,
 name, bpm (140), time_sig {num,den} (4/4), ppq (480), render {...}, view {...}, notes [...]}`.
 Per note: `{id "nNNNN" (monotonic, never reused), start_beat, len_beats, pitch, velocity (100),
-technique (normal|slur|spiccato|detache — project-only for now), pan (0.0, bipolar −1..+1 —
-project-only, like technique), bend [] (piecewise-linear {beat, semitones} control points
+technique (normal|slur|spiccato|detache — conditions renders on conditioned checkpoints),
+pan (0.0, bipolar −1..+1 — project-only), bend [] (piecewise-linear {beat, semitones} control points
 relative to note start), vibrato {depth_semitones 0, rate_hz 5.5, onset_beats 0.15}}`. Every
 schema producer agrees on this field set — `project_store.build_note` (backend canonical),
 `editing.makeNote` (frontend), `mock.js` seeds, `midi_import`, and `cache.segment_hash` all
@@ -64,10 +64,13 @@ lane "velocity", snap "step"}` is the persisted camera/editor state. Saves are a
 (`.tmp` + `os.replace`) with rev locking (409 on stale) and rolling 20-rev backups in
 `project.backup/`.
 
-**Articulation is project-only** while all checkpoints are unconditioned (`conditioning: []`):
-it colors the note in the UI and is stored, but never affects a render. `technique_model_vocab`
-(stub `normal→normal, slur→normal, spiccato→spiccato, detache→normal`) maps onto a future
-conditioned model's technique vocab and must stay unused until then.
+**Articulation conditions renders on conditioned checkpoints**: with an unconditioned
+checkpoint (`conditioning: []`) it only colors the note in the UI, but when the loaded
+checkpoint carries per-frame conditioning, each note's technique is mapped through
+`technique_model_vocab` (identity: `normal→normal, slur→slur, spiccato→spiccato,
+detache→detache`, config-overridable) onto the model's articulation signal, and per-note
+velocity / vibrato-depth>0 / note-boundary tracks are rasterized alongside it
+(`render._segment_note_events` → `Arioso.infer.build_cond`).
 
 ## Data layout (`Data/studio_projects/`, configurable via `studio.yaml: projects_root`)
 
@@ -310,9 +313,12 @@ charcoal theme). All canvases are DPR-scaled. Modules:
   `config.articulations`; `shade`/`mix` color helpers. Owns the **minimap click/drag
   jump-scroll** (`wireMinimap` — centers the main view on the clicked beat).
 - **`js/interact.js`** — grid/keys pointer + wheel state machine: draw/select/delete/slice
-  tools, marquee, move, edge-resize, wheel-pan, ctrl-wheel zoom-about-cursor, alt = temp free
-  snap, right-click delete, double-click → open bend editor, **piano-key click = preview
-  note** (`player.previewNote`). Every mutation goes through an `editing.js` command.
+  tools, marquee, move, edge-resize, wheel-pan, ctrl-wheel zoom-about-cursor, **ctrl+drag =
+  marquee multi-select even over notes** (shift+ctrl adds to the selection), **alt = temp free
+  snap for any drag** (toggleable mid-drag; ctrl wins when both are held), **alt+drag on a note
+  body = free unsnapped end-resize**, right-click delete, double-click → open bend editor,
+  **piano-key click = preview note** (`player.previewNote`). Every mutation goes through an
+  `editing.js` command.
 - **`js/editing.js`** — command factories (each `{label, mutate, invert, selAfter?, phAfter?}`):
   create/delete/move/resize, `setVelocity`/`setVelocities`, `setPans`, `setBendsFlat`,
   `sliceNote`, `setTechnique`, `setBend`, `setVibrato`, `paste`. `makeNote` stamps the full
@@ -370,10 +376,10 @@ charcoal theme). All canvases are DPR-scaled. Modules:
 
 ## Future work
 
-- **Conditioned checkpoints hookup** — once conditioned models exist, wire the stub
-  `technique_model_vocab` table (`config.technique_model_vocab()`, currently unused) into the
-  render path (`cond_frames`), so articulation stops being project-only. Must stay unused while
-  `cfg.conditioning == []`.
+- **~~Conditioned checkpoints hookup~~ — DONE**: `_render_segments` builds all of the loaded
+  checkpoint's conditioning tracks (articulation via `technique_model_vocab`, velocity, vibrato,
+  note-boundary distances) per segment via `_segment_note_events` → `Arioso.infer.build_cond`;
+  unconditioned checkpoints still pass `cond_frames=None`.
 - **Pan → audio** — `pan` is stored + edited + folded into the segment hash but is **not** yet
   applied at render (renders are mono). Add a stereo pan stage to `stitch`/`vocode` output.
 - **Per-note bend import** — `midi_import` currently drops MIDI pitch-bend events (imported

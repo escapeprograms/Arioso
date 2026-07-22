@@ -16,8 +16,10 @@ reported to the polling UI through the ``progress(status)`` callback the
   2. **prior** — ``quantized_prior(pitch=...)`` -> ``synth.render(midi, total_samples)``
      (the segment span incl. pads, so the tail isn't clipped) -> ``mel_frames``.
   3. **model** — lazy-load the checkpoint (:mod:`Studio.model_registry`) and run
-     ``generate_mel`` (chunked CFM ODE, ``cond_frames=None`` — renders are always
-     unconditioned for now).
+     ``generate_mel`` (chunked CFM ODE). When the checkpoint carries per-frame
+     conditioning, the segment's notes are rasterized to cond tracks
+     (``_segment_note_events`` -> ``Arioso.infer.build_cond``) on the prior mel's
+     grid; an unconditioned checkpoint passes ``cond_frames=None`` unchanged.
   4. **vocoder** — the frozen BigVGAN-v2 vocoder -> float32 segment waveform.
   5. **write** — the segment WAV to the cache; then ``mix.wav`` (PCM16) + ``mix.peaks``
      + ``render/meta.json`` (with the segment manifest) after all segments exist.
@@ -45,13 +47,14 @@ import threading
 import numpy as np
 
 from common.config import SR
+from common.dataset_schema import NoteEvent
 
 from .cache import plan_render, prune_cache, stitch
 from .library import (MIX_PEAKS, MIX_WAV, RENDER_DIR, RENDER_META,
                       SEG_CACHE_DIR, atomic_write_json)
-from .midi_export import write_midi
+from .midi_export import _MIN_NOTE_S, write_midi
 from .peaks import write_peaks
-from .timing import seconds_to_beats
+from .timing import beats_to_seconds, seconds_to_beats
 
 # Serializes GPU forwards (mel gen + vocode) across projects rendering at once.
 GPU_LOCK = threading.Lock()
@@ -100,6 +103,41 @@ def _sub_doc(doc: dict, seg: dict) -> tuple[dict, int]:
     return sub, total_samples
 
 
+def _segment_note_events(sub: dict, tech_map: dict[str, str],
+                         warnings: list[str]) -> list[NoteEvent]:
+    """A segment sub-doc's notes as :class:`NoteEvent`\\ s for conditioning (torch-free).
+
+    Mirrors :func:`Studio.midi_export.project_to_pretty_midi`'s timing so the cond spans line up
+    frame-for-frame with the MIDI the prior is rendered from: ``start_s`` = beats->seconds at the
+    doc BPM, ``end_s`` = ``start_s + max(len_s, _MIN_NOTE_S)`` (the same short-note floor). Velocity
+    is clamped to ``[1, 127]``. Each note's ``technique`` is mapped through ``tech_map`` to the
+    articulation name the conditioned model expects; an unknown / unmapped technique falls back to
+    ``"normal"`` (a background render job must not crash — :func:`rasterize_articulation` hard-errors
+    on an unknown name) with one warning per distinct unknown technique. ``vibrato`` is on when the
+    note's vibrato depth is ``> 0`` (the :func:`Studio.bend.has_expression` predicate).
+    """
+    bpm = float(sub["bpm"])
+    events: list[NoteEvent] = []
+    unknown_seen: set[str] = set()
+    for n in sub["notes"]:
+        start_s = beats_to_seconds(float(n["start_beat"]), bpm)
+        len_s = beats_to_seconds(float(n["len_beats"]), bpm)
+        end_s = start_s + max(len_s, _MIN_NOTE_S)
+        vel = max(1, min(127, int(round(float(n.get("velocity", 100))))))
+        tech = str(n.get("technique", "normal"))
+        artic = tech_map.get(tech)
+        if artic is None:
+            artic = "normal"
+            if tech not in unknown_seen:
+                unknown_seen.add(tech)
+                warnings.append(
+                    f"unknown technique {tech!r} has no model mapping; conditioned as 'normal'")
+        vibrato = float((n.get("vibrato") or {}).get("depth_semitones", 0.0)) > 0.0
+        events.append(NoteEvent(start_s=start_s, end_s=end_s, pitch=int(n["pitch"]),
+                                velocity=vel, articulation=artic, vibrato=vibrato))
+    return events
+
+
 def _render_segments(cfg, doc: dict, to_render: list[dict], cache_dir: str,
                      model: str, checkpoint: str, prior_mode: str,
                      device: str | None, progress) -> tuple[str, list[str]]:
@@ -113,7 +151,7 @@ def _render_segments(cfg, doc: dict, to_render: list[dict], cache_dir: str,
     """
     import torch
 
-    from Arioso.infer import generate_mel
+    from Arioso.infer import build_cond, generate_mel
     from common.audio_io import write_pcm16
     from common.prior import quantized_prior
     from common.vocoder import mel_frames, vocode
@@ -129,6 +167,11 @@ def _render_segments(cfg, doc: dict, to_render: list[dict], cache_dir: str,
           segments_done=0, segments_total=n_render)
     voc = get_vocoder(loaded.device)
     pitch = "bend" if prior_mode == "bend" else "quantized"
+    # Per-frame conditioning tracks are built only when the checkpoint expects them; an
+    # unconditioned checkpoint keeps cond_frames=None. tech_map resolves each note's technique
+    # to the model's articulation vocab.
+    cond_specs = loaded.cfg.conditioning
+    tech_map = cfg.technique_model_vocab()
 
     warnings: list[str] = []
     for done, seg in enumerate(to_render, start=1):
@@ -146,12 +189,17 @@ def _render_segments(cfg, doc: dict, to_render: list[dict], cache_dir: str,
         prior_mel = mel_frames(synth.render(midi_path,
                                             total_samples=total_samples))
 
+        cond_frames = None
+        if cond_specs:
+            ev = _segment_note_events(sub, tech_map, warnings)
+            cond_frames = build_cond(ev, prior_mel.shape[-1], cond_specs)
+
         _emit(progress, "model", base_pct + 3,
               f"segment {done}/{n_render}: generating mel",
               segments_done=done - 1, segments_total=n_render)
         with GPU_LOCK:
             mel = generate_mel(loaded.model, prior_mel, loaded.cfg,
-                               loaded.device, cond_frames=None)
+                               loaded.device, cond_frames=cond_frames)
             _emit(progress, "vocoder", base_pct + 6,
                   f"segment {done}/{n_render}: vocoding",
                   segments_done=done - 1, segments_total=n_render)

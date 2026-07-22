@@ -67,9 +67,9 @@ class Articulation:
 # Normal = FL Studio's default lime-green note; the rest get distinct fills.
 _DEFAULT_ARTICULATIONS = (
     Articulation("normal", "1", "#6cc04a", "norm", "normal"),
-    Articulation("slur", "2", "#dd8452", "slur", "normal"),
+    Articulation("slur", "2", "#dd8452", "slur", "slur"),
     Articulation("spiccato", "3", "#4c9be8", "spic", "spiccato"),
-    Articulation("detache", "4", "#c46bd0", "det", "normal"),
+    Articulation("detache", "4", "#c46bd0", "det", "detache"),
 )
 
 
@@ -119,11 +119,13 @@ class StudioConfig:
         return [dataclasses.asdict(a) for a in self.articulations]
 
     def technique_model_vocab(self) -> dict[str, str]:
-        """Stub technique -> model-vocab mapping table (unused while unconditioned).
+        """Technique -> model-vocab (articulation) mapping table.
 
         Kept as a derived view of the articulation vocab so there is one source of
-        truth. Must never gate a current render — the loaded checkpoints are all
-        ``conditioning: []`` and articulation stays project-only.
+        truth. Feeds real conditioned renders: ``Studio.render`` maps each note's
+        technique through this table to the articulation name the conditioned
+        checkpoint's articulation signal expects (unmapped names fall back to
+        ``normal``). With an unconditioned checkpoint it is simply unused.
         """
         return {a.name: a.model_vocab for a in self.articulations}
 

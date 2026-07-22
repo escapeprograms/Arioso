@@ -16,6 +16,8 @@ Per verified clip ``<id>`` we write, under :attr:`CompileParams.root`:
 * ``prior_mel/<id>.npy`` — ``[128, T]`` mel of the informed sawtooth prior rendered
   from the surviving notes (real velocities) at the GT's exact length.
 * ``onsets/<id>.npy`` — ``[K]`` int32 onset frames.
+* ``offsets/<id>.npy`` — ``[K]`` int32 note-offset frames (Arioso's sinusoidal
+  boundary-distance conditioning reads these alongside ``onsets/``).
 * ``cond/{articulation,velocity,vibrato}/<id>.npy`` — ``[T]`` uint8 conditioning tracks.
 
 **Notes already live in cleaned-audio time** (the align stage baked the offset into
@@ -50,11 +52,11 @@ import numpy as np
 
 from common.audio_io import load_mono, voiced_rms_normalize, write_pcm16
 from common.config import HOP_SIZE, N_MELS, SR
-from common.dataset_schema import (ARTICULATIONS, DIR_GT, DIR_ONSETS,
+from common.dataset_schema import (ARTICULATIONS, DIR_GT, DIR_OFFSETS, DIR_ONSETS,
                                    DIR_PRIOR_MEL, DIR_TARGET_MEL,
                                    MANIFEST_JSON, MANIFEST_SCHEMA_VERSION,
                                    NoteEvent, cond_dir, load_manifest,
-                                   onset_frames, rasterize_articulation,
+                                   offset_frames, onset_frames, rasterize_articulation,
                                    rasterize_velocity, rasterize_vibrato,
                                    write_manifest)
 from common.prior import quantized_prior
@@ -148,6 +150,7 @@ def _artifact_paths(root: str, base: str) -> dict[str, str]:
         "target_mel": os.path.join(root, DIR_TARGET_MEL, base + ".npy"),
         "prior_mel": os.path.join(root, DIR_PRIOR_MEL, base + ".npy"),
         "onsets": os.path.join(root, DIR_ONSETS, base + ".npy"),
+        "offsets": os.path.join(root, DIR_OFFSETS, base + ".npy"),
         "articulation": os.path.join(root, cond_dir("articulation"), base + ".npy"),
         "velocity": os.path.join(root, cond_dir("velocity"), base + ".npy"),
         "vibrato": os.path.join(root, cond_dir("vibrato"), base + ".npy"),
@@ -277,8 +280,9 @@ def compile_one(cfg: LabelerConfig, clip_id: str, manifest: dict,
         raise AssertionError(
             f"{clip_id}: prior_mel T={prior_mel.shape[1]} != target_mel T={n_frames}")
 
-    # -- onsets + three conditioning tracks (notes already in cleaned-audio time) --
+    # -- onsets + offsets + three conditioning tracks (notes already in cleaned-audio time) --
     onsets = onset_frames(events, n_frames)
+    offs = offset_frames(events, n_frames)
     artic = rasterize_articulation(events, n_frames)
     vel = rasterize_velocity(events, n_frames)
     vib = rasterize_vibrato(events, n_frames)
@@ -291,6 +295,7 @@ def compile_one(cfg: LabelerConfig, clip_id: str, manifest: dict,
     np.save(paths["target_mel"], target_mel.astype(np.float32))
     np.save(paths["prior_mel"], prior_mel.astype(np.float32))
     np.save(paths["onsets"], onsets.astype(np.int32))
+    np.save(paths["offsets"], offs.astype(np.int32))
     np.save(paths["articulation"], artic.astype(np.uint8))
     np.save(paths["velocity"], vel.astype(np.uint8))
     np.save(paths["vibrato"], vib.astype(np.uint8))

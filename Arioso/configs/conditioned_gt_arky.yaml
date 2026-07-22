@@ -1,0 +1,32 @@
+# gt_arky-only conditioned run — all five per-frame signals, human ground truth alone.
+#
+# Trains over the single Labeler root (Data/datasets/gt_arky). Conditioning mixes the three
+# categorical signals (articulation / velocity / vibrato, resolved from the SIGNALS registry) with
+# the two sinusoidal boundary signals (time since note onset / time until note offset, resolved from
+# BOUNDARY_SIGNALS) — a compact 50 ms attack/decay-shaped cue around each note boundary. The gt_arky
+# root carries every track on disk (cond/ + onsets/ + offsets/), so nothing falls back to the
+# unknown/zero fill; the boundary signals require offsets/, so recompile the root first:
+#   python -m Labeler.compile --all --force
+#
+# Usage:  python -m Arioso.train --config Arioso/configs/conditioned_gt_arky.yaml
+
+config_version: 1
+
+model:
+  # Three categorical + two boundary signals. Boundary signals default window_ms=50.0 (the legacy
+  # DataSynthesizer ONSET_DECAY_MS); override inline, e.g. {name: time_until_offset, window_ms: 75.0}.
+  conditioning:
+    - articulation
+    - velocity
+    - vibrato
+    - time_since_onset            # window_ms defaults to 50.0 (legacy ONSET_DECAY_MS)
+    - time_until_offset           # override style: {name: time_until_offset, window_ms: 75.0}
+  lr: 2.0e-4                # peak LR after warmup
+  lr_schedule: cosine       # post-warmup anneal shape
+  lr_min: 2.0e-5            # LR floor at total_steps (10% of peak)
+  warmup_steps: 2000        # linear ramp 0 -> lr before annealing starts
+  total_steps: 20000        # ~25 min of audio only — overfit risk; watch val curves
+
+run:
+  data_roots: [Data/datasets/gt_arky]         # human ground truth alone (no synthetic bulk)
+  name: arioso_conditioned_gt_arky

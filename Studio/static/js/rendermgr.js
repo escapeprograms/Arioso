@@ -1,5 +1,6 @@
 // rendermgr.js — render orchestration + the render UX around it. Owns the toolbar Render
 // button, the transport progress strip, and the playback-source indicator. On render it
+// first awaits a save flush (the server renders the on-disk project.json), then
 // POSTs (scope "selection" with the current selection when non-empty, else "phrase") using
 // the DEV drawer's model/checkpoint/prior_mode, polls status every 500 ms to drive the
 // progress UI, and on completion loads the peaks (waveform lane) + decodes the wav (player
@@ -19,6 +20,7 @@ const $ = (id) => document.getElementById(id);
 let flash = () => {};
 let setStatus = () => {};
 let requestStatic = () => {};
+let flushSave = async () => {};
 
 let polling = false;
 let pollTimer = null;
@@ -37,6 +39,7 @@ export function init(deps = {}){
   flash = deps.flashStatus || (() => {});
   setStatus = deps.setStatus || (() => {});
   requestStatic = deps.requestStatic || (() => {});
+  flushSave = deps.flushSave || (async () => {});
 
   const btn = $('btn-render');
   if (btn) btn.onclick = () => render();
@@ -74,6 +77,16 @@ export async function render(){
   showProgress(true);
   setProgress('serialize', 0);
   setStatus(`rendering ${scope}${scope === 'selection' ? ` (${ids.length})` : ''}…`);
+
+  // The server renders the on-disk project.json — flush the (debounced) autosave first
+  // or a render right after an edit would synthesize the previous document.
+  await flushSave();
+  if (store.save.state !== 'saved'){
+    running = false; setBtnBusy(false); showProgress(false);
+    flash('save failed — render aborted');
+    settle(false);
+    return;
+  }
 
   try {
     await api.startRender(store.projectId, opts);

@@ -16,7 +16,9 @@ import each other, yet they must agree, byte-for-byte, on *where* artifacts live
   through this exact function.
 * The note-grouping helpers (:func:`note_groups`, :func:`note_groups_from_midi`,
   :func:`expand_to_frames`) and the per-frame rasterizers (:func:`rasterize_articulation`
-  / :func:`rasterize_velocity` / :func:`rasterize_vibrato`, :func:`onset_frames`).
+  / :func:`rasterize_velocity` / :func:`rasterize_vibrato`) plus the boundary-frame arrays
+  (:func:`onset_frames` -> ``onsets/``, :func:`offset_frames` -> ``offsets/``) that Arioso's
+  sinusoidal boundary-distance conditioning consumes.
 * The manifest reader/writer (:func:`load_manifest`, :func:`write_manifest`) and the
   :class:`DatasetRoot` accessor that Arioso and eval consume a root through.
 
@@ -52,6 +54,7 @@ DIR_GT = "gt"                        # <base>.wav mono PCM16 @ SR, voiced-RMS at
 DIR_TARGET_MEL = "target_mel"        # <base>.npy [N_MELS, T] float32 (common.vocoder mel)
 DIR_PRIOR_MEL = "prior_mel"          # <base>.npy [N_MELS, T] float32, same T
 DIR_ONSETS = "onsets"                # <base>.npy [K] int32 onset frame indices, sorted unique
+DIR_OFFSETS = "offsets"              # <base>.npy [K] int32 note-offset frame indices, sorted unique
 COND_ROOT = "cond"                   # per-signal conditioning tracks live under cond/<signal>/
 
 
@@ -305,6 +308,23 @@ def onset_frames(notes: list[NoteEvent], n_frames: int, offset_s: float = 0.0) -
     return np.unique(frames).astype(np.int32)
 
 
+def offset_frames(notes: list[NoteEvent], n_frames: int, offset_s: float = 0.0) -> np.ndarray:
+    """``[K]`` int32 note-offset frame indices: sorted, unique, **clamped** to ``[0, n_frames-1]``.
+
+    Each note's ``end_s`` is rounded with :func:`frame_of` (after ``offset_s``) — the mel
+    frame that note stops sounding on — and, unlike :func:`onset_frames`, out-of-range
+    frames are **clamped rather than dropped** (``np.clip`` into ``[0, n_frames-1]``). This
+    is deliberate: a note ending at the recording tail rounds to ``n_frames`` (or beyond),
+    and dropping it would erase a real boundary — Arioso's "time until offset" signal must
+    still see an offset event on the last frame. Onsets drop because a note starting past
+    the tail was never in the clip; offsets clamp because the note *is* in the clip and only
+    its end fell off the grid.
+    """
+    frames = np.array([frame_of(nt.end_s + offset_s) for nt in notes], dtype=np.int64)
+    frames = np.clip(frames, 0, n_frames - 1)
+    return np.unique(frames).astype(np.int32)
+
+
 # --- manifest read / write ------------------------------------------------------
 
 def _frame_block() -> dict:
@@ -410,6 +430,9 @@ class DatasetRoot:
 
     def onsets_path(self, base: str) -> str:
         return os.path.join(self.path, DIR_ONSETS, base + ".npy")
+
+    def offsets_path(self, base: str) -> str:
+        return os.path.join(self.path, DIR_OFFSETS, base + ".npy")
 
     def cond_path(self, signal: str, base: str) -> str | None:
         """Path to ``base``'s ``signal`` track, or ``None`` if the root lacks that signal."""

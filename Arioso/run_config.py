@@ -36,7 +36,8 @@ from datetime import datetime
 import yaml
 
 from .cfm import LOSSES
-from .config import (AriosoConfig, CondSpec, SIGNALS, cfg_to_dict)
+from .config import (AriosoConfig, BOUNDARY_SIGNALS, BoundaryCondSpec, CondSpec,
+                     SIGNALS, cfg_to_dict)
 from .schedules import SCHEDULES
 from .solvers import SOLVERS
 
@@ -117,15 +118,21 @@ def _coerce(value, default, field_name: str, yaml_path: str):
     return value
 
 
-def _parse_conditioning(raw, yaml_path: str) -> tuple[CondSpec, ...]:
-    """Parse the ``conditioning:`` list into a tuple of ``CondSpec``.
+def _parse_conditioning(raw, yaml_path: str) -> tuple[CondSpec | BoundaryCondSpec, ...]:
+    """Parse the ``conditioning:`` list into a tuple of specs (categorical + boundary).
+
+    Two registries are consulted, ``SIGNALS`` (categorical :class:`CondSpec`) then
+    ``BOUNDARY_SIGNALS`` (sinusoidal :class:`BoundaryCondSpec`):
 
     - ``[]`` / ``null`` -> ``()`` (the unconditioned ablation).
-    - a string ``"technique"`` -> ``SIGNALS`` registry lookup.
-    - a dict with a **known** ``name`` -> ``dataclasses.replace(SIGNALS[name], **overrides)``
-      (tweak emb_dim etc. of a registered signal).
-    - a dict with a **novel** ``name`` -> an inline custom ``CondSpec(**entry)`` (requires at least
-      ``num_classes``, ``emb_dim``, ``dir``).
+    - a string ``"velocity"`` / ``"time_since_onset"`` -> registry lookup (SIGNALS first, then
+      BOUNDARY_SIGNALS); an unknown name errors listing both registries.
+    - a dict with a **known** ``name`` -> ``dataclasses.replace`` of that registry's spec with the
+      given overrides (tweak ``emb_dim`` / ``window_ms`` etc.), overrides validated against the
+      matched spec type's field names.
+    - a dict with a **novel** ``name`` -> an inline spec: a ``CondSpec`` if the mapping carries
+      ``num_classes`` (the categorical discriminator), else a ``BoundaryCondSpec``. Unknown fields
+      error against the chosen type's field set.
     """
     if raw is None or raw == []:
         return ()
@@ -133,15 +140,21 @@ def _parse_conditioning(raw, yaml_path: str) -> tuple[CondSpec, ...]:
         raise ValueError(
             f"{yaml_path}: 'conditioning' must be a list (of signal names or specs), "
             f"got {type(raw).__name__}")
-    specs: list[CondSpec] = []
+    cond_fields = {f.name for f in dataclasses.fields(CondSpec)}
+    bound_fields = {f.name for f in dataclasses.fields(BoundaryCondSpec)}
+    specs: list[CondSpec | BoundaryCondSpec] = []
     for entry in raw:
         if isinstance(entry, str):
-            if entry not in SIGNALS:
+            if entry in SIGNALS:
+                specs.append(SIGNALS[entry])
+            elif entry in BOUNDARY_SIGNALS:
+                specs.append(BOUNDARY_SIGNALS[entry])
+            else:
                 raise ValueError(
-                    f"{yaml_path}: unknown conditioning signal '{entry}'. "
-                    f"Known signals: {sorted(SIGNALS)}. Define a custom one inline as a mapping "
-                    f"with name/num_classes/emb_dim/dir.")
-            specs.append(SIGNALS[entry])
+                    f"{yaml_path}: unknown conditioning signal '{entry}'. Known categorical "
+                    f"signals: {sorted(SIGNALS)}; known boundary signals: {sorted(BOUNDARY_SIGNALS)}. "
+                    f"Define a custom one inline as a mapping (categorical needs num_classes/emb_dim/"
+                    f"dir; boundary needs name/boundary/direction).")
         elif isinstance(entry, dict):
             entry = dict(entry)
             name = entry.get("name")
@@ -150,28 +163,42 @@ def _parse_conditioning(raw, yaml_path: str) -> tuple[CondSpec, ...]:
                     f"{yaml_path}: a conditioning entry mapping must have a 'name' key, "
                     f"got {entry!r}")
             if name in SIGNALS:
-                # Known signal with overrides: start from the registered spec.
+                # Known categorical signal with overrides: start from the registered CondSpec.
                 overrides = {k: v for k, v in entry.items() if k != "name"}
-                unknown = set(overrides) - {f.name for f in dataclasses.fields(CondSpec)}
+                unknown = set(overrides) - cond_fields
                 if unknown:
                     raise ValueError(
                         f"{yaml_path}: unknown CondSpec field(s) {sorted(unknown)} for signal "
-                        f"'{name}'. Valid fields: {[f.name for f in dataclasses.fields(CondSpec)]}")
+                        f"'{name}'. Valid fields: {sorted(cond_fields)}")
                 specs.append(dataclasses.replace(SIGNALS[name], **overrides))
-            else:
-                # Novel inline signal: build a fresh CondSpec (name/num_classes/emb_dim/dir req'd).
-                valid = {f.name for f in dataclasses.fields(CondSpec)}
-                unknown = set(entry) - valid
+            elif name in BOUNDARY_SIGNALS:
+                # Known boundary signal with overrides: start from the registered BoundaryCondSpec.
+                overrides = {k: v for k, v in entry.items() if k != "name"}
+                unknown = set(overrides) - bound_fields
                 if unknown:
                     raise ValueError(
-                        f"{yaml_path}: unknown CondSpec field(s) {sorted(unknown)} for inline "
-                        f"signal '{name}'. Valid fields: {sorted(valid)}")
+                        f"{yaml_path}: unknown BoundaryCondSpec field(s) {sorted(unknown)} for "
+                        f"boundary signal '{name}'. Valid fields: {sorted(bound_fields)}")
+                specs.append(dataclasses.replace(BOUNDARY_SIGNALS[name], **overrides))
+            else:
+                # Novel inline signal: num_classes present -> categorical, else boundary.
+                is_categorical = "num_classes" in entry
+                valid = cond_fields if is_categorical else bound_fields
+                unknown = set(entry) - valid
+                if unknown:
+                    kind = "CondSpec" if is_categorical else "BoundaryCondSpec"
+                    raise ValueError(
+                        f"{yaml_path}: unknown {kind} field(s) {sorted(unknown)} for inline signal "
+                        f"'{name}'. Valid CondSpec fields: {sorted(cond_fields)}; valid "
+                        f"BoundaryCondSpec fields: {sorted(bound_fields)}.")
                 try:
-                    specs.append(CondSpec(**entry))
+                    specs.append(CondSpec(**entry) if is_categorical else BoundaryCondSpec(**entry))
                 except TypeError as e:
+                    need = ("num_classes, emb_dim, dir" if is_categorical
+                            else "name (boundary/direction/window_ms default)")
                     raise ValueError(
                         f"{yaml_path}: inline conditioning signal '{name}' is missing required "
-                        f"fields (need num_classes, emb_dim, dir): {e}")
+                        f"fields (need {need}): {e}")
         else:
             raise ValueError(
                 f"{yaml_path}: each conditioning entry must be a signal name (string) or a "

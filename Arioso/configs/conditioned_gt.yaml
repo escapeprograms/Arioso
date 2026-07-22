@@ -23,4 +23,4 @@ model:
 
 run:
   data_roots: [Data, Data/datasets/gt_arky]   # synthetic corpus + human ground truth
-  name: arioso_conditioned_gt
+  name: 7-21-conditioned-small-data

@@ -1,6 +1,8 @@
 // interact.js — pointer + wheel handling for the grid, piano-keys column, and velocity
 // lane. Implements the tool state machine (draw/select/delete/slice), marquee, move,
-// edge-resize, wheel pan, ctrl+wheel zoom-about-cursor, and alt = temporary free snap.
+// edge-resize, wheel pan, ctrl+wheel zoom-about-cursor. Modifier gestures: ctrl+drag =
+// marquee multi-select (shift+ctrl adds to it); alt = temporary free snap for any drag,
+// and alt+drag on a note body = free end-resize. Ctrl wins when both are held.
 // Every mutation goes through editing.js commands via state.apply().
 import {
   store, apply, clamp, noteById, notesSorted, selectedIds, isSelected,
@@ -105,6 +107,22 @@ function onDown(e){
   const hit = hitNote(x, y);
   const tool = store.tool;
 
+  // ctrl+drag marquee multi-select (works over notes); shift+ctrl adds to selection
+  if (e.ctrlKey && (tool === 'draw' || tool === 'select')){
+    if (!e.shiftKey) clearSelection();
+    ptr = { mode: 'marquee', base: new Set(selectedIds()) };
+    store.drag = { kind: 'marquee', x0: x, y0: y, x1: x, y1: y };
+    requestStatic();
+    return;
+  }
+  // alt+drag on a note body = free end-resize (ctrl wins if both held)
+  if (e.altKey && hit && (tool === 'draw' || tool === 'select')){
+    if (!isSelected(hit.note.id)) selectOnly(hit.note.id);
+    store.altFree = true;
+    startResize(hit.note, hit.edge || 'end', e);
+    return;
+  }
+
   if (tool === 'delete'){
     if (hit) apply(edit.deleteNotes([hit.note.id]));
     ptr = { mode: 'delete-paint' };
@@ -168,6 +186,9 @@ function onMove(e){
   const { x, y } = xy(grid, e);
 
   if (ptr && ptr.mode === 'bend'){ bendedit.pointerMove(x, y); return; }
+
+  // alt held/released mid-drag toggles free snap live (move/resize/create)
+  if (ptr && ptr.mode !== 'idle'){ store.altFree = e.altKey; }
 
   if (!ptr || ptr.mode === 'idle'){
     store.hover = { beat: xToBeat(x), pitch: pitchRowAt(y) };
@@ -239,6 +260,7 @@ function onUp(e){
   if (!ptr){ return; }
   const p = ptr; ptr = null;
   try { document.getElementById('grid').releasePointerCapture(e.pointerId); } catch {}
+  store.altFree = false;
 
   if (p.mode === 'bend'){ bendedit.pointerUp(); requestStatic(); return; }
 

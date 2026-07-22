@@ -15,13 +15,13 @@ default_prior_mode: bend              # bend | quantized (quantized ignores per-
 
 # Playing-technique vocabulary. name -> class; key auto-binds the 1..9 hotkey;
 # color fills the note rect (normal = FL default green); abbrev is the compact
-# label; model_vocab is the stub mapping onto a future conditioned model's
-# technique vocab (unused while checkpoints are unconditioned).
+# label; model_vocab maps the technique onto the conditioned model's articulation
+# vocab at render time (unused by unconditioned checkpoints).
 articulations:
   - {name: normal,   key: "1", color: "#6cc04a", abbrev: norm, model_vocab: normal}
-  - {name: slur,     key: "2", color: "#dd8452", abbrev: slur, model_vocab: normal}
+  - {name: slur,     key: "2", color: "#dd8452", abbrev: slur, model_vocab: slur}
   - {name: spiccato, key: "3", color: "#4c9be8", abbrev: spic, model_vocab: spiccato}
-  - {name: detache,  key: "4", color: "#c46bd0", abbrev: det,  model_vocab: normal}
+  - {name: detache,  key: "4", color: "#c46bd0", abbrev: det,  model_vocab: detache}
 
 # --- segment cache (render/cache phase) ---------------------------------------
 cache:

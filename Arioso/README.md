@@ -69,7 +69,7 @@ score .mid ─ common.prior.quantized_prior().render (additive saw, corner ladde
         │
    train.py: x_t,v_target = cfm.interpolate(x0,x1,t); v = model(x_t,x0,t,mask,cond); masked_mse
         │                                            (AdamW, warmup+cosine, bf16, EMA)
-   infer.py: x0 (+cond from build_cond_frames) -> Euler -> mel -> frozen BigVGAN -> wav
+   infer.py: x0 (+cond from build_cond) -> Euler -> mel -> frozen BigVGAN -> wav
    eval/: copy_synthesis (vocoder ceiling) · metrics (MSE/MCD/Delta-mel, cond-aware)
 ```
 
@@ -179,14 +179,16 @@ score .mid ─ common.prior.quantized_prior().render (additive saw, corner ladde
   sample) both **on-path** (`val/velocity_mse`) and **off-path** (`val/offpath_velocity_mse`, a
   fixed-seed `OFFPATH_EVAL_STD` perturbation — a restoration probe comparable across runs), plus
   per-`t` curves.
-- **infer.py** — `build_prior_mel`, `build_cond_frames`, `integrate` (Euler), `generate_mel`
+- **infer.py** — `build_prior_mel`, `build_cond`, `integrate` (Euler), `generate_mel`
   (chunk+crossfade), frozen BigVGAN to wav. `main()` loads the checkpoint **first** and rebuilds the
   model from its embedded config (`cfg_from_dict`), so pre-conditioning checkpoints load unchanged.
-  - **build_cond_frames(midi, n_frames, spec_name, args)** — `[T]` uint8 id track for one signal,
-    all built from the same score (offset 0.0, matching `build_prior_mel`'s no-shift convention):
-    `articulation` = the constant `args.articulation` id over every note group (rest fills gaps),
-    `velocity` = the MIDI's own per-note velocities rasterized, `vibrato` = the constant
-    `args.vibrato` flag span-filled — via the `common.dataset_schema` group/rasterize helpers.
+  - **build_cond(notes, n_frames, specs)** — `{name: [T] track}` for every spec the checkpoint
+    expects, all rasterized from the same `NoteEvent` list (offset 0.0, matching `build_prior_mel`'s
+    no-shift convention). Categorical specs are `[T]` uint8 id tracks via the `common.dataset_schema`
+    rasterizers (`articulation` from each note's stamped name, `velocity` from the MIDI's own
+    per-note velocities, `vibrato` from the per-note flag); boundary specs are `[T]` **int64**
+    distance tracks — `onset_frames`/`offset_frames` (drop vs clamp, the training policy) through
+    `Arioso.dataset.boundary_distances` (sentinel −1; must stay int64 — uint8 would corrupt it).
   - **--articulation** (`choices=ARTICULATIONS`, default `normal`) and **--vibrato /--no-vibrato**
     CLI args apply one constant per signal to every note (per-note control is a future extension).
     `main()` assembles `cond_frames` generically over `cfg.conditioning`; the deprecated `"technique"`
@@ -197,8 +199,10 @@ score .mid ─ common.prior.quantized_prior().render (additive saw, corner ladde
 - **eval/copy_synthesis.py** — step-0 vocoder-ceiling sanity (run first); vocodes GT audio directly,
   builds no model, so it needs no conditioning handling. **eval/metrics.py** — recon/transport MSE,
   MCD, Delta-mel plots. Rebuilds the model from the checkpoint's embedded config (`cfg_from_dict`);
-  per held-out recording it loads each conditioning spec's track via the root's `cond_path` (or the
-  unknown fill for a root lacking that signal), and passes `cond_frames=` through `generate_mel`.
+  per held-out recording it loads each categorical spec's track via the root's `cond_path` (or the
+  unknown fill for a root lacking that signal), builds boundary tracks from the root's on-disk
+  `onsets`/`offsets` arrays via `boundary_distances` (missing array → all −1 inactive), and passes
+  `cond_frames=` through `generate_mel`.
 
 ## Run
 
@@ -255,7 +259,7 @@ fully-resolved config to `Arioso/models/config_<run-name>.yaml` (uploaded to W&B
 4. New conditioning signal → add its encoding constants to `common.dataset_schema`
    (`SIGNAL_NUM_CLASSES`/`SIGNAL_REST_ID` + a rasterizer) so producers emit it under
    `cond/<signal>/`, then a `CondSpec` constant deriving its classes/pad from those schema
-   constants + one `SIGNALS` registry entry + an inference-time branch in `infer.build_cond_frames`.
+   constants + one `SIGNALS` registry entry + an inference-time branch in `infer.build_cond`.
    (A YAML `conditioning: [...]` then names it; a root lacking it is unknown-filled automatically.)
 
 ## Dependencies & caveats

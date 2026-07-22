@@ -42,7 +42,7 @@ async function boot(){
   keymap.init(actions);
   player.init();
   devopts.init();
-  rendermgr.init({ flashStatus, setStatus, requestStatic });
+  rendermgr.init({ flashStatus, setStatus, requestStatic, flushSave });
   io.init({ flashStatus, setStatus, reloadProject });
   setDirtyHandler(scheduleSave);
 
@@ -156,20 +156,36 @@ function followPlayhead(){
 }
 
 // ---------- autosave ----------
-let saveTimer = null, retryDelay = 1000;
+let saveTimer = null, retryDelay = 1000, saveInflight = null;
 function scheduleSave(){ updateSaveInd(); clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, 1500); }
 function scheduleRetry(){ clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, retryDelay); retryDelay = Math.min(retryDelay * 2, 15000); }
 
-async function saveNow(){
-  if (!store.doc || store.projectId == null) return;
-  if (store.save.state === 'saved') return;
+function saveNow(){
+  if (!store.doc || store.projectId == null) return Promise.resolve();
+  if (saveInflight) return saveInflight;           // join the PUT already in flight
+  if (store.save.state === 'saved') return Promise.resolve();
+  saveInflight = doSave().finally(() => { saveInflight = null; });
+  return saveInflight;
+}
+
+// Await the in-flight PUT (if any), then save again if edits landed meanwhile. Render
+// awaits this before POSTing: the server renders the on-disk project.json, so a pending
+// debounced save would otherwise make it render the previous document.
+async function flushSave(){
+  if (saveInflight) await saveInflight;
+  if (store.save.state !== 'saved') await saveNow();
+}
+
+async function doSave(){
   clearTimeout(saveTimer);
   store.save.state = 'saving'; updateSaveInd();
   foldViewIntoDoc();
   try {
     const res = await api.putProject(store.projectId, store.doc);
     if (res && res.rev != null) store.doc.rev = res.rev;
-    store.save.state = 'saved'; store.save.err = null; retryDelay = 1000;
+    // A mutation mid-PUT flips state to 'unsaved' — keep it dirty so flushSave re-saves.
+    if (store.save.state === 'saving') store.save.state = 'saved';
+    store.save.err = null; retryDelay = 1000;
   } catch (err) {
     if ((err instanceof api.ApiError && err.status === 409) || err.status === 409){
       // reload the server copy (Phase 1: last-write-wins recovery)
