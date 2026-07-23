@@ -115,6 +115,7 @@ class NoteEvent:
     velocity: int = 80
     articulation: str = "normal"
     vibrato: bool = False
+    env_dct: tuple[float, ...] | None = None
 
 
 # --- the one rounding rule ------------------------------------------------------

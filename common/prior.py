@@ -415,7 +415,16 @@ class PriorSynth:
                 if n <= 1:
                     continue
                 f0 = self.pitch(inst, note, n, sr)
-                wav = self.source(f0, sr) * (note.velocity / 127.0)
+                # In-memory producers may attach a per-note energy envelope
+                # (``note.env_dct = [c0, c1, c2]``); disk MIDIs carry no such
+                # attribute and take the exact legacy velocity path, keeping
+                # DataSynthesizer's on-disk priors byte-identical.
+                env = getattr(note, "env_dct", None)
+                if env is not None:
+                    from common.envelope import env_gain  # lazy: envelope pulls in librosa
+                    wav = self.source(f0, sr) * env_gain(env, n)
+                else:
+                    wav = self.source(f0, sr) * (note.velocity / 127.0)
                 wav = self.envelope(wav, sr)
                 out[start:end] += wav
                 sounding[start:end] = True

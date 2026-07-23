@@ -1,9 +1,9 @@
 // render.js — all canvas drawing. #mel/#notes/#vel/#onset/#minimap/#ruler redraw on
 // view/data changes (drawStage); #overlay redraws every rAF (drawOverlay).
-import { store, pitchName, fmtTime, clamp } from './state.js';
+import { store, pitchName, fmtTime, clamp, envDb, noteEnvCoeffs } from './state.js';
 import {
   layout, timeToX, xToTime, binToY, binForPitch, pitchForBin,
-  noteRect, velBarRect, visibleNotes, visibleTimeRange, durationS,
+  noteRect, visibleNotes, visibleTimeRange, durationS,
 } from './timeline.js';
 import { tileUrl } from './api.js';
 
@@ -95,7 +95,7 @@ export function drawStage(){
   drawRuler();
   drawMel();
   drawNotes();
-  drawVel();
+  drawEnv();
   drawOnset();
   drawMinimap();
 }
@@ -227,25 +227,56 @@ function drawVibrato(g, r, col){
   g.stroke();
 }
 
-// ---------- velocity lane ----------
-function drawVel(){
+// ---------- envelope lane ----------
+// Per-note A-weighted loudness envelope, rasterized as a filled dB curve.
+// db(u), env_dct, and the velocity fallback (VEL_C0_A/VEL_C0_B) all live in state.js
+// so render + synth share one definition (envDb / noteEnvCoeffs).
+// Fixed display range (power-dB); values outside are clamped.
+const ENV_DB_MIN = -30, ENV_DB_MAX = 16;
+function envDbToY(db, h){
+  const f = clamp((db - ENV_DB_MIN) / (ENV_DB_MAX - ENV_DB_MIN), 0, 1);
+  return h - f * (h - 4);   // keep the old 4px top margin the vel bars had
+}
+// trace the top curve across [x0, x0+bw] with lineTo (path must be started by caller)
+function traceEnvTop(g, c, x0, bw, h){
+  for (let px = 0; px <= bw; px += 2) g.lineTo(x0 + px, envDbToY(envDb(c, bw > 0 ? px / bw : 0), h));
+  g.lineTo(x0 + bw, envDbToY(envDb(c, 1), h));   // exact endpoint
+}
+function drawEnv(){
   const g = cx.vel, w = layout.width, h = layout.velH;
   g.clearRect(0, 0, w, h);
   g.fillStyle = '#0b0d10'; g.fillRect(0, 0, w, h);
-  const dragVel = store.drag && store.drag.kind === 'vel' ? store.drag : null;
   for (const n of visibleNotes()){
-    let vel = n.velocity;
-    if (dragVel && dragVel.id === n.id) vel = dragVel.preview;
-    const x = timeToX(n.start_s);
+    const hasEnv = Array.isArray(n.env_dct) && n.env_dct.length >= 3;
+    const c = noteEnvCoeffs(n);
+    const x0 = timeToX(n.start_s);
     const bw = Math.max(2, (n.end_s - n.start_s) * store.view.pxPerSec);
-    const bh = clamp(vel / 127, 0, 1) * (h - 4);
-    g.globalAlpha = n.id === store.selectedId ? 1 : 0.75;
-    g.fillStyle = techColor(n.technique);
-    g.fillRect(x, h - bh, bw, bh);
+    const selected = n.id === store.selectedId;
+    const col = techColor(n.technique);
+    // filled region from lane bottom up to the curve (match vel-bar fill/alpha)
+    g.globalAlpha = (selected ? 1 : 0.75) * (hasEnv ? 1 : 0.5);   // dim velocity-fallback notes
+    g.fillStyle = col;
+    g.beginPath();
+    g.moveTo(x0, h);
+    traceEnvTop(g, c, x0, bw, h);
+    g.lineTo(x0 + bw, h);
+    g.closePath();
+    g.fill();
     g.globalAlpha = 1;
-    if (n.id === store.selectedId){ g.strokeStyle = '#fff'; g.lineWidth = 1; g.strokeRect(Math.round(x) + .5, h - bh + .5, Math.round(bw) - 1, bh - 1); }
+    // top edge: white when selected (mirrors old highlight); dashed when on the
+    // velocity fallback so real-envelope notes are visually distinguishable.
+    if (selected || !hasEnv){
+      g.strokeStyle = selected ? '#fff' : col;
+      g.lineWidth = 1;
+      if (!hasEnv && !selected) g.setLineDash([3, 2]);
+      g.beginPath();
+      g.moveTo(x0, envDbToY(envDb(c, 0), h));
+      traceEnvTop(g, c, x0, bw, h);
+      g.stroke();
+      g.setLineDash([]);
+    }
   }
-  g.fillStyle = '#6b7482'; g.font = '9px ui-sans-serif'; g.fillText('vel', 4, 10);
+  g.fillStyle = '#6b7482'; g.font = '9px ui-sans-serif'; g.fillText('env', 4, 10);
 }
 
 // ---------- onset lane ----------

@@ -136,6 +136,9 @@ input,select{ font:inherit; color:inherit; }
 .src-ind[data-src=model]{ color:#eafff0; border-color:var(--accent); }
 .src-ind[data-src=model] .dot{ background:var(--accent); box-shadow:0 0 6px rgba(90,197,79,.7); }
 .src-ind[data-src=synth] .dot{ background:var(--warn); }
+.src-ind[data-src=prior]{ color:#dbeeff; border-color:#4c9be8; }
+.src-ind[data-src=prior] .dot{ background:#4c9be8; box-shadow:0 0 6px rgba(76,155,232,.7); }
+.src-ind.busy .dot{ animation:pulse 1s infinite; }
 .src-ind.forced{ border-color:var(--warn); color:var(--warn); }
 .src-ind:hover{ color:var(--fg); }
 

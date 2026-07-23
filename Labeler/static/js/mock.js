@@ -30,10 +30,17 @@ function buildDoc(){
   seq.forEach((pitch, i) => {
     const dur = 0.6, start = t, end = t + dur; t += 0.75;
     const vel = 60 + Math.round(30 * Math.sin(i * 0.7) + 10);
+    // synthetic env_dct so the envelope lane shows real curves; leave every 5th
+    // note without one to exercise the velocity-fallback (dimmed/dashed) style.
+    const env_dct = (i % 5 === 4) ? undefined
+      : [+(4 + 4 * Math.sin(i * 0.5)).toFixed(3),   // c0 level
+         +(2 * Math.cos(i * 0.9)).toFixed(3),       // c1 tilt
+         +(1.5 * Math.sin(i * 1.3)).toFixed(3)];    // c2 arch
     notes.push({
       id: 'n' + String(i).padStart(4, '0'),   // 0-based, matches server note_id(ordinal)
       start_s: +start.toFixed(3), end_s: +end.toFixed(3), pitch,
       velocity: Math.max(1, Math.min(127, vel)),
+      ...(env_dct ? { env_dct } : {}),
       technique: ARTS[i % 4].name,
       vibrato: vibNotes.has(i),
       slur_group: null,
@@ -145,6 +152,12 @@ export async function getMeta(){ return buildMeta(); }
 export async function getNotes(){ return JSON.parse(JSON.stringify({ ...mockDoc, rev: mockRev, verified: mockVerified })); }
 export async function putNotes(id, doc){ mockRev = (doc.rev || mockRev) + 1; mockDoc = JSON.parse(JSON.stringify(doc)); mockDoc.rev = mockRev; if (doc.verified !== undefined) mockVerified = !!doc.verified; console.log('[mock] PUT notes -> rev', mockRev, `(${(doc.notes || []).length} notes)`); return { rev: mockRev }; }
 export async function setVerified(id, verified){ mockVerified = !!verified; mockRev += 1; return { status: 'ok', rev: mockRev, verified: mockVerified }; }
+export async function envelopePass(id){
+  // Stamp a flat env_dct on every note (c0 from velocity, flat shape) and bump rev.
+  for (const n of mockDoc.notes) n.env_dct = [+(24 * n.velocity / 127 - 12).toFixed(4), 0, 0];
+  mockRev += 1; mockDoc.rev = mockRev;
+  return { status: 'ok', rev: mockRev, n_notes: mockDoc.notes.length };
+}
 
 let compileJob = null;
 export async function startCompile(){ compileJob = { start: performance.now() }; return { status: 'accepted' }; }

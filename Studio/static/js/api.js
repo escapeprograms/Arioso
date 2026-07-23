@@ -36,6 +36,13 @@ export const startRender     = (id, opts = {}) => MOCK ? mock.startRender(id, op
 export const getRenderStatus = (id)            => MOCK ? mock.getRenderStatus(id)     : j('GET', `/api/projects/${id}/render/status`);
 export const getRenderMeta   = (id)            => MOCK ? mock.getRenderMeta(id)       : j('GET', `/api/projects/${id}/render/meta`);
 
+// Torch-free, synchronous whole-document saw-prior render (the PRIOR playback source).
+export const renderPrior = (id, opts = {}) => {
+  if (MOCK) return mock.renderPrior(id, opts);
+  const qs = opts.prior_mode ? `?prior_mode=${encodeURIComponent(opts.prior_mode)}` : '';
+  return j('POST', `/api/projects/${id}/render-prior${qs}`);
+};
+
 // ---------- import / export ----------
 export const exportProject = (id, opts = {}) => MOCK ? mock.exportProject(id, opts) : j('POST', `/api/projects/${id}/export`, opts);
 

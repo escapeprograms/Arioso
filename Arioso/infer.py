@@ -26,6 +26,7 @@ import torch
 from common.dataset_schema import (ARTICULATIONS, NoteEvent, offset_frames,
                                    onset_frames, rasterize_articulation,
                                    rasterize_velocity, rasterize_vibrato)
+from common.envelope import velocity_to_env_dct
 from common.prior import quantized_prior
 from common.vocoder import load_vocoder, mel_frames, vocode
 
@@ -41,9 +42,19 @@ def build_prior_mel(midi_path: str) -> np.ndarray:
 
     Built by the same ``common.prior`` pipeline the dataset's ``prior_mel`` was, so the inference
     prior matches training. No GT-alignment shift here: the score's onsets *are* t=0.
+
+    Each in-memory note gets a flat ``env_dct`` derived from its MIDI velocity
+    (:func:`~common.envelope.velocity_to_env_dct`) so the CLI prior matches the env-prior
+    distribution the new (env-baked) checkpoints were trained on.
     """
+    import pretty_midi
+
     synth = quantized_prior()   # factory defaults ARE the PRIOR_* knobs (one source of truth)
-    return mel_frames(synth.render(midi_path))
+    pm = pretty_midi.PrettyMIDI(midi_path)
+    for inst in pm.instruments:
+        for note in inst.notes:
+            note.env_dct = velocity_to_env_dct(note.velocity)
+    return mel_frames(synth.render(pm))
 
 
 def _note_events(midi_path: str, *, articulation: str = "normal",

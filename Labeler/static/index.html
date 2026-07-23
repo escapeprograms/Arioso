@@ -51,6 +51,10 @@
         </label>
       </div>
 
+      <button id="btn-envelope" class="verified-toggle" title="Compute per-note energy envelopes from current note boundaries" hidden>
+        <span class="glyph">&#9835;</span><span class="lbl">Envelopes</span>
+      </button>
+
       <button id="btn-verified" class="verified-toggle" title="Mark this clip verified (gates dataset compile)" hidden>
         <span class="glyph">&#10003;</span><span class="lbl">Verified</span>
       </button>
@@ -83,7 +87,7 @@
           <canvas id="mel"></canvas>
           <canvas id="notes"></canvas>
         </div>
-        <canvas id="vel" title="Velocity lane (drag to set)"></canvas>
+        <canvas id="vel" title="Per-note energy envelope (velocity edited via inspector)"></canvas>
         <canvas id="onset" title="Onset strength"></canvas>
         <canvas id="overlay"></canvas>
 

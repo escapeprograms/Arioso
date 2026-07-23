@@ -199,6 +199,38 @@ async def render_project(project_id: str, request: Request):
         status_code=202)
 
 
+@router.post("/api/projects/{project_id}/render-prior")
+def render_prior_endpoint(project_id: str, request: Request):
+    """Render the whole document's raw saw prior (torch-free, no GPU) for playback.
+
+    A synchronous CPU render (FastAPI runs sync handlers in a threadpool, so the
+    numpy prior synthesis never blocks the event loop) -> ``render/prior_mix.wav`` +
+    ``.peaks``, returned as ``/media`` URLs for the frontend's PRIOR source. Optional
+    ``prior_mode`` query param (``bend`` | ``quantized``) defaults to the config
+    default. 404 unknown project; 400 on a bad ``prior_mode`` or a zero-length note.
+    """
+    cfg = _cfg(request)
+    if not project_exists(cfg, project_id):
+        return _err(404, "project_not_found", project_id)
+
+    prior_mode = request.query_params.get("prior_mode") or cfg.default_prior_mode
+    if prior_mode not in PRIOR_MODES:
+        return _err(400, "bad_request", f"prior_mode must be one of {list(PRIOR_MODES)}")
+
+    doc = project_store.load(cfg, project_id)
+    if doc is None:
+        return _err(404, "project_not_found", project_id)
+    pdir = project_dir(cfg, project_id)
+
+    # Imported here (not at module top) so the api import graph stays torch-free.
+    from .render import render_prior_mix
+
+    try:
+        return render_prior_mix(cfg, doc, pdir, prior_mode=prior_mode)
+    except ValueError as exc:                       # non-positive length note
+        return _err(400, "bad_request", str(exc))
+
+
 @router.get("/api/projects/{project_id}/render/status")
 def get_render_status(project_id: str, request: Request):
     cfg = _cfg(request)

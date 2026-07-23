@@ -55,7 +55,8 @@ def blank_human() -> dict:
 
 
 def build_note(ordinal: int, *, start_s: float, end_s: float, pitch: int,
-               velocity: int, technique: str, vibrato: bool, auto: dict) -> dict:
+               velocity: int, technique: str, vibrato: bool, auto: dict,
+               env_dct=None) -> dict:
     return {
         "id": note_id(ordinal),
         "start_s": round(float(start_s), 6),
@@ -65,6 +66,9 @@ def build_note(ordinal: int, *, start_s: float, end_s: float, pitch: int,
         "technique": str(technique),
         "vibrato": bool(vibrato),
         "slur_group": None,
+        # Per-note energy envelope (3 DCT coeffs) baked into the compile prior; None
+        # until the envelope pass runs. Kept through build_document rebuilds.
+        "env_dct": list(env_dct) if env_dct else None,
         "auto": {
             "velocity": int(auto.get("velocity", velocity)),
             "technique": str(auto.get("technique", technique)),
@@ -92,7 +96,7 @@ def build_document(cfg: LabelerConfig, clip_id: str, notes: list[dict], *,
         out_notes.append(build_note(
             i, start_s=n["start_s"], end_s=n["end_s"], pitch=n["pitch"],
             velocity=n["velocity"], technique=n["technique"], vibrato=n["vibrato"],
-            auto=n["auto"]))
+            auto=n["auto"], env_dct=n.get("env_dct")))
     return {
         "schema_version": SCHEMA_VERSION,
         "clip_id": clip_id,
@@ -214,6 +218,35 @@ def set_verified(cfg: LabelerConfig, clip_id: str, verified: bool) -> dict | Non
         _roll_backup(cfg, clip_id, current)
         doc = dict(current)
         doc["verified"] = bool(verified)
+        doc["rev"] = current.get("rev", 0) + 1
+        return _write(cfg, clip_id, doc)
+
+
+def set_envelopes(cfg: LabelerConfig, clip_id: str,
+                  env_by_id: dict[str, list[float]]) -> dict | None:
+    """Merge per-note ``env_dct`` coefficients onto a clip's notes, bumping ``rev``.
+
+    ``env_by_id`` maps note id -> the 3 DCT coefficients fit from the clip's loudness
+    envelope (see :func:`common.envelope.note_env_from_wav`). Each matching note's
+    ``env_dct`` is set to those coefficients (rounded to 4 decimals); notes absent from
+    the map are left untouched. Same lock / rolling-backup / rev-bump discipline as
+    :func:`set_verified` so the editor's next full-doc PUT sees the bumped rev and does
+    not 409. Returns the updated document (``None`` if the clip has no notes yet).
+    """
+    with lock_for(clip_id):
+        current = load(cfg, clip_id)
+        if current is None:
+            return None
+        _roll_backup(cfg, clip_id, current)
+        doc = dict(current)
+        notes = []
+        for n in doc.get("notes", []):
+            nn = dict(n)
+            env = env_by_id.get(nn.get("id"))
+            if env is not None:
+                nn["env_dct"] = [round(float(x), 4) for x in env]
+            notes.append(nn)
+        doc["notes"] = notes
         doc["rev"] = current.get("rev", 0) + 1
         return _write(cfg, clip_id, doc)
 

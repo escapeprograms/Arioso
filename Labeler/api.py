@@ -16,11 +16,13 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from common.audio_io import load_mono
 from common.config import HOP_SIZE as HOP, SR
+from common.envelope import loudness_db, note_env_from_wav
 
 from . import notes_store
 from .config import STAGES
-from .library import (MEL_DIR, MEL_META, clip_dir,
+from .library import (CLEANED_WAV, MEL_DIR, MEL_META, clip_dir, clip_file,
                       find_raw_wav, get_clip_info, read_json, scan_clips)
 from .media import stretch_name
 from .processing import NOTES_MODES
@@ -229,6 +231,42 @@ async def set_verified(clip_id: str, request: Request):
     if doc is None:
         return _err(404, "no_notes", f"{clip_id} has no notes.json to verify yet")
     return {"status": "ok", "rev": doc["rev"], "verified": doc.get("verified", False)}
+
+
+# --- envelope pass ----------------------------------------------------------
+
+@router.post("/api/clips/{clip_id}/envelope")
+def compute_envelopes(clip_id: str, request: Request):
+    """Fit per-note ``env_dct`` from the CURRENT note boundaries + ``cleaned.wav``.
+
+    Reads the human-edited ``notes.json`` boundaries and ``cleaned.wav`` (both already in
+    cleaned-audio time — the align stage baked the offset in, so no shift here), computes
+    the clip's A-weighted loudness once, fits 3 cosine coefficients per note, and writes
+    them back with a rev bump. 409 while a job runs on the clip (same gate as ``process``).
+    """
+    import os
+    cfg = _cfg(request)
+    jobs = _jobs(request)
+    if not _clip_exists(cfg, clip_id):
+        return _err(404, "clip_not_found", clip_id)
+    if jobs.is_running(clip_id):
+        return _err(409, "job_running", f"a job is running for {clip_id}; try again after it finishes")
+    doc = notes_store.load(cfg, clip_id)
+    if doc is None:
+        return _err(404, "no_notes", f"{clip_id} has no notes.json yet")
+    cleaned = clip_file(cfg, clip_id, CLEANED_WAV)
+    if not os.path.isfile(cleaned):
+        return _err(404, "not_processed", f"{clip_id} has no cleaned.wav yet (process it first)")
+    y = load_mono(cleaned, sr=SR)
+    loud = loudness_db(y, SR)
+    env_by_id = {
+        n["id"]: note_env_from_wav(loud, float(n["start_s"]), float(n["end_s"]))
+        for n in doc.get("notes", [])
+    }
+    saved = notes_store.set_envelopes(cfg, clip_id, env_by_id)
+    if saved is None:
+        return _err(404, "no_notes", f"{clip_id} has no notes.json to envelope yet")
+    return {"status": "ok", "rev": saved["rev"], "n_notes": len(env_by_id)}
 
 
 # --- compile (gt_arky -> standard dataset root) -----------------------------

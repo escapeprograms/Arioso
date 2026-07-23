@@ -45,7 +45,7 @@ export function init(deps = {}){
   if (btn) btn.onclick = () => render();
 
   const src = $('src-ind');
-  if (src) src.onclick = () => { player.setForceSynth(!player.forceSynth); updateSourceIndicator(); };
+  if (src) src.onclick = () => { cycleSource(); };
 
   subscribe(updateSourceIndicator);
   onMutation(onDocMutated);
@@ -57,9 +57,55 @@ export function init(deps = {}){
 // ---------- staleness reaction ----------
 function onDocMutated(){
   // state.markDirty already set renderInfo.fresh = false.
+  priorFresh = false;   // the cached prior no longer matches the doc; re-render on next switch
   if (player.isPlaying && player.renderActive && !player.useRender()) player.reschedule();  // -> synth
   updateSourceIndicator();
   requestStatic();   // redraw the waveform lane dimmed
+}
+
+// ---------- playback-source cycling (MODEL -> PRIOR -> SYNTH) ----------
+// The prior source is torch-free and cheap, so it is rendered lazily on demand and
+// re-rendered whenever the document changed since the last prior render (priorFresh).
+let priorFresh = false;
+let priorBusy = false;
+
+// Ensure a fresh prior buffer is loaded; returns false (and stays off PRIOR) on failure.
+async function ensurePrior(){
+  if (priorFresh && player.hasPrior()) return true;
+  if (!store.projectId){ flash('no project'); return false; }
+  if (priorBusy) return false;
+  priorBusy = true;
+  setIndBusy(true);
+  try {
+    // The server renders the on-disk project.json — flush the debounced autosave first.
+    await flushSave();
+    if (store.save.state !== 'saved'){ flash('save failed — prior aborted'); return false; }
+    const opts = devopts.getOpts();
+    const meta = await api.renderPrior(store.projectId, { prior_mode: opts.prior_mode });
+    if (meta && meta.wav) await player.loadPriorWav(meta.wav);
+    else { flash('prior render produced no audio'); return false; }
+    priorFresh = true;
+    return true;
+  } catch (err){
+    surfaceError(err);
+    return false;
+  } finally {
+    priorBusy = false;
+    setIndBusy(false);
+    updateSourceIndicator();
+  }
+}
+
+async function cycleSource(){
+  if (priorBusy) return;
+  const order = ['auto', 'prior', 'synth'];
+  const next = order[(order.indexOf(player.sourceMode) + 1) % order.length];
+  if (next === 'prior'){
+    const ok = await ensurePrior();
+    if (!ok){ player.setSourceMode('synth'); updateSourceIndicator(); return; }
+  }
+  player.setSourceMode(next);
+  updateSourceIndicator();
 }
 
 // ---------- the render action ----------
@@ -160,6 +206,9 @@ export async function onProjectLoaded(){
   stopPolling();
   running = false; setBtnBusy(false); showProgress(false);
   player.clearRenderBuffer();
+  player.clearPriorBuffer();
+  player.setSourceMode('auto');
+  priorFresh = false;
   waveform.clear();
   store.renderInfo.fresh = false;
   store.renderInfo.meta = null;
@@ -194,16 +243,40 @@ function surfaceError(err){
   const b = $('btn-render'); if (b) b.title = 'Render failed: ' + msg;
 }
 
-// ---------- playback-source indicator ("MODEL" / "SYNTH") ----------
+// ---------- playback-source indicator ("MODEL" / "PRIOR" / "SYNTH") ----------
+// Busy state shown while the prior renders; the indicator otherwise reflects the
+// active source-cycle mode (click cycles MODEL -> PRIOR -> SYNTH).
+function setIndBusy(on){
+  const el = $('src-ind'); if (!el) return;
+  el.classList.toggle('busy', on);
+  if (on){
+    el.dataset.src = 'prior';
+    const lbl = el.querySelector('.lbl'); if (lbl) lbl.textContent = 'PRIOR';
+    el.title = 'Rendering prior…';
+  }
+}
+
 function updateSourceIndicator(){
   const el = $('src-ind'); if (!el) return;
-  const usingRender = player.useRender();
+  if (priorBusy) return;                       // setIndBusy owns the display while rendering
   const lbl = el.querySelector('.lbl');
-  el.dataset.src = usingRender ? 'model' : 'synth';
-  el.classList.toggle('forced', player.forceSynth && player.hasRender);
-  if (lbl) lbl.textContent = usingRender ? 'MODEL' : 'SYNTH';
-  if (!player.hasRender) el.title = 'No render yet — preview synth';
-  else if (player.forceSynth) el.title = 'Forced to synth — click to allow the model render';
-  else if (usingRender) el.title = 'Playing the model render — click to force synth';
-  else el.title = 'Render is stale — click to toggle synth lock';
+  const mode = player.sourceMode;
+  el.classList.remove('forced', 'busy');
+  if (mode === 'prior'){
+    el.dataset.src = 'prior';
+    if (lbl) lbl.textContent = 'PRIOR';
+    el.title = 'Playing the raw saw prior — click for synth';
+  } else if (mode === 'synth'){
+    el.dataset.src = 'synth';
+    el.classList.toggle('forced', player.hasRender);
+    if (lbl) lbl.textContent = 'SYNTH';
+    el.title = 'Preview synth — click to cycle back to the model render';
+  } else {                                      // 'auto'
+    const usingRender = player.useRender();
+    el.dataset.src = usingRender ? 'model' : 'synth';
+    if (lbl) lbl.textContent = usingRender ? 'MODEL' : 'SYNTH';
+    if (!player.hasRender) el.title = 'No render yet — click to audition the prior';
+    else if (usingRender) el.title = 'Playing the model render — click to audition the prior';
+    else el.title = 'Render is stale — click to audition the prior';
+  }
 }

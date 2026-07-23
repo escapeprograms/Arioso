@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import pretty_midi
 
+from common.envelope import velocity_to_env_dct
+
 from .bend import pitch_bend_events
 from .timing import beats_to_seconds
 from .voices import partition_voices
@@ -97,8 +99,14 @@ def project_to_pretty_midi(doc: dict, note_ids: list[str] | None = None,
             start_s = beats_to_seconds(float(n["start_beat"]), bpm)
             end_s = start_s + max(beats_to_seconds(float(n["len_beats"]), bpm), _MIN_NOTE_S)
             vel = max(1, min(127, int(round(float(n.get("velocity", 100))))))
-            inst.notes.append(pretty_midi.Note(
-                velocity=vel, pitch=int(n["pitch"]), start=start_s, end=end_s))
+            note_obj = pretty_midi.Note(
+                velocity=vel, pitch=int(n["pitch"]), start=start_s, end=end_s)
+            # Bake the per-note energy envelope into the prior: an explicit env_dct
+            # lane (future) wins; otherwise derive a flat env from velocity. Set as a
+            # dynamic attribute PriorSynth.render reads (common.prior:422).
+            note_obj.env_dct = (list(n["env_dct"]) if n.get("env_dct")
+                                else velocity_to_env_dct(vel))
+            inst.notes.append(note_obj)
             if prior_mode == "bend":
                 nxt = (beats_to_seconds(float(vnotes[i + 1]["start_beat"]), bpm)
                        if i + 1 < len(vnotes) else None)

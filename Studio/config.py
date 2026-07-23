@@ -22,7 +22,8 @@ import yaml
 from common.config import HOP_SIZE as HOP, SR  # canonical audio/mel contract
 
 # project.json schema version (bumped when the on-disk project shape changes).
-SCHEMA_VERSION = 1
+# v2: one-time cache invalidation for the env-shaped prior (velocity->env_dct baked in).
+SCHEMA_VERSION = 2
 
 # Mel frame rate the model + saw prior are sampled at (hop 512 @ 44.1 kHz).
 FRAME_RATE = SR / HOP  # ~86.13 fps

@@ -50,14 +50,28 @@ from common.config import SR
 from common.dataset_schema import NoteEvent
 
 from .cache import plan_render, prune_cache, stitch
-from .library import (MIX_PEAKS, MIX_WAV, RENDER_DIR, RENDER_META,
-                      SEG_CACHE_DIR, atomic_write_json)
-from .midi_export import _MIN_NOTE_S, write_midi
+from .library import (MIX_PEAKS, MIX_WAV, PRIOR_MIX_PEAKS, PRIOR_MIX_WAV,
+                      RENDER_DIR, RENDER_META, SEG_CACHE_DIR, atomic_write_json)
+from .midi_export import (_MIN_NOTE_S, project_to_pretty_midi, select_notes,
+                          validate_notes)
 from .peaks import write_peaks
 from .timing import beats_to_seconds, seconds_to_beats
 
 # Serializes GPU forwards (mel gen + vocode) across projects rendering at once.
 GPU_LOCK = threading.Lock()
+
+# Per-project locks serializing the torch-free prior-mix render (render_prior_mix)
+# against concurrent writes of the same project's prior_mix.wav.
+_PRIOR_LOCKS: dict[str, threading.Lock] = {}
+_PRIOR_LOCKS_GUARD = threading.Lock()
+
+
+def _prior_lock(project_id: str) -> threading.Lock:
+    with _PRIOR_LOCKS_GUARD:
+        lk = _PRIOR_LOCKS.get(project_id)
+        if lk is None:
+            lk = _PRIOR_LOCKS[project_id] = threading.Lock()
+        return lk
 
 # Silence written for an empty project (no notes) so the mix.wav is a valid file.
 _EMPTY_SILENCE_S = 0.05
@@ -180,14 +194,15 @@ def _render_segments(cfg, doc: dict, to_render: list[dict], cache_dir: str,
               segments_done=done - 1, segments_total=n_render)
 
         sub, total_samples = _sub_doc(doc, seg)
-        midi_path = os.path.join(cache_dir, f"{seg['hash']}.mid")
-        _mid, seg_warn = write_midi(sub, midi_path, note_ids=None,
-                                    prior_mode=prior_mode)
+        # Build the score in memory (no temp .mid round-trip) so per-note env_dct
+        # attributes survive into the prior; keep write_midi's same-pitch-overlap
+        # warning behavior by validating the same selection it did.
+        _seg_errors, seg_warn = validate_notes(select_notes(sub, None))
         warnings.extend(seg_warn)
+        pm = project_to_pretty_midi(sub, note_ids=None, prior_mode=prior_mode)
 
         synth = quantized_prior(pitch=pitch)
-        prior_mel = mel_frames(synth.render(midi_path,
-                                            total_samples=total_samples))
+        prior_mel = mel_frames(synth.render(pm, total_samples=total_samples))
 
         cond_frames = None
         if cond_specs:
@@ -206,10 +221,6 @@ def _render_segments(cfg, doc: dict, to_render: list[dict], cache_dir: str,
             audio = vocode(voc, torch.from_numpy(mel[None]).float())
 
         write_pcm16(os.path.join(cache_dir, seg["wav"]), audio)
-        try:
-            os.remove(midi_path)
-        except OSError:
-            pass
         _emit(progress, "model", int(15 + 80 * done / n_render),
               f"segment {done}/{n_render} done",
               segments_done=done, segments_total=n_render)
@@ -313,3 +324,53 @@ def run_render(cfg, doc: dict, project_dir: str, *, scope: str = "phrase",
     _emit(progress, "write", 100, "done", state="done",
           segments_done=n_render, segments_total=n_render)
     return meta
+
+
+def render_prior_mix(cfg, doc: dict, project_dir: str,
+                     prior_mode: str | None = None) -> dict:
+    """Render the whole document's raw saw prior to ``render/prior_mix.wav`` (+ peaks).
+
+    The torch-free, GPU-free companion to :func:`run_render`: it synthesizes the
+    corner-saw prior audio the diffusion model consumes (with each note's ``env_dct``
+    baked in via :func:`Studio.midi_export.project_to_pretty_midi`) so the UI can
+    audition the prior as a third playback source. No model / vocoder / ``GPU_LOCK``.
+    Notes render at their absolute onsets, so the WAV starts at beat 0 like the model
+    mix. A per-project lock serializes concurrent writes of the same ``prior_mix.wav``.
+
+    Returns ``{wav, peaks, duration_s, prior_mode}`` with ``/media`` URLs (mirroring
+    :func:`run_render`'s meta). Raises ``ValueError`` on a non-positive-length note.
+    """
+    from common.audio_io import write_pcm16
+    from common.prior import quantized_prior
+
+    prior_mode = prior_mode or cfg.default_prior_mode
+    project_id = doc.get("project_id") or os.path.basename(project_dir.rstrip("/\\"))
+    pitch = "bend" if prior_mode == "bend" else "quantized"
+
+    rdir = os.path.join(project_dir, RENDER_DIR)
+    os.makedirs(rdir, exist_ok=True)
+
+    bpm = float(doc["bpm"])
+    notes = doc.get("notes", [])
+    end_s = max((beats_to_seconds(float(n["start_beat"]) + float(n["len_beats"]), bpm)
+                 for n in notes), default=0.0)
+    if notes:
+        # Match the render mix's trailing pad so the prior tail isn't clipped.
+        total_samples = max(1, int(round((end_s + cfg.cache.pad_s) * SR)))
+    else:
+        total_samples = int(_EMPTY_SILENCE_S * SR)
+
+    with _prior_lock(project_id):
+        pm = project_to_pretty_midi(doc, note_ids=None, prior_mode=prior_mode)
+        synth = quantized_prior(pitch=pitch)
+        y = np.asarray(synth.render(pm, total_samples=total_samples), dtype=np.float32)
+
+        write_pcm16(os.path.join(rdir, PRIOR_MIX_WAV), y)
+        write_peaks(y, os.path.join(rdir, PRIOR_MIX_PEAKS))
+
+    return {
+        "wav": _media_url(project_id, RENDER_DIR, PRIOR_MIX_WAV),
+        "peaks": _media_url(project_id, RENDER_DIR, PRIOR_MIX_PEAKS),
+        "duration_s": float(len(y)) / SR,
+        "prior_mode": prior_mode,
+    }

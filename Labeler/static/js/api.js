@@ -30,6 +30,7 @@ export const getNotes   = (id)             => MOCK ? mock.getNotes(id)         :
 export const putNotes   = (id, doc)        => MOCK ? mock.putNotes(id, doc)    : j('PUT', `/api/clips/${id}/notes`, doc);
 export const processClip= (id, opts = {})  => MOCK ? mock.processClip(id, opts): j('POST', `/api/clips/${id}/process`, opts);
 export const setVerified= (id, verified)   => MOCK ? mock.setVerified(id, verified) : j('POST', `/api/clips/${id}/verified`, { verified });
+export const envelopePass= (id)             => MOCK ? mock.envelopePass(id)     : j('POST', `/api/clips/${id}/envelope`, {});
 export const startCompile= ()              => MOCK ? mock.startCompile()        : j('POST', '/api/compile', {});
 export const compileStatus= ()             => MOCK ? mock.compileStatus()       : j('GET', '/api/compile/status');
 

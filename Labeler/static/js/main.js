@@ -231,6 +231,41 @@ function wireTransport(){
   $('insp-vib').onchange = (e) => { if (store.selectedId) apply(edit.setFields(store.selectedId, { vibrato: e.target.checked, 'human.vibrato': true }, { label: 'vibrato' })); };
   $('region-pop-close').onclick = () => { store.paintMode = false; $('region-popover').hidden = true; };
   $('btn-verified').onclick = () => toggleVerified();
+  $('btn-envelope').onclick = () => runEnvelopePass();
+}
+
+// ---------------- envelope pass ----------------
+async function runEnvelopePass(){
+  if (!store.doc || store.clipId == null) return;
+  const b = $('btn-envelope');
+  b.disabled = true;
+  try {
+    const res = await api.envelopePass(store.clipId);
+    // The server bumped rev and wrote env_dct; pull the fresh doc so the next full-doc
+    // PUT does not 409, then flash the note count on the button label.
+    store.doc = await api.getNotes(store.clipId);
+    invalidateSorted();
+    initIdCounter(store.doc); clearHistory();
+    store.save.state = 'saved';
+    requestStatic(); onStoreChange();
+    flashEnvelope(b, `${res.n_notes} notes ✓`);
+  } catch (err) {
+    if (err instanceof api.ApiError && err.status === 409){ flashEnvelope(b, 'job running'); }
+    else recordError('envelope: ' + err);
+  } finally {
+    b.disabled = false;
+  }
+}
+let _envFlashTimer = null;
+function flashEnvelope(b, msg){
+  const lbl = b.querySelector('.lbl');
+  lbl.textContent = msg;
+  clearTimeout(_envFlashTimer);
+  _envFlashTimer = setTimeout(() => { lbl.textContent = 'Envelopes'; }, 2000);
+}
+
+function syncEnvelopeBtn(){
+  $('btn-envelope').hidden = !store.doc;
 }
 
 // ---------------- verified flag ----------------
@@ -390,6 +425,7 @@ function onStoreChange(){
   updateSidebarActive();
   syncTransport();
   syncVerifiedBtn();
+  syncEnvelopeBtn();
   if (store.paintMode) renderRegionList();   // keep the mute-region popover in sync
 }
 

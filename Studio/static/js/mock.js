@@ -177,6 +177,14 @@ export async function getRenderMeta(id){
   const e = new Error('not_rendered'); e.status = 404; e.code = 'not_rendered'; throw e;
 }
 
+// Torch-free prior render — reuses the fake synth to produce a whole-doc waveform.
+export async function renderPrior(id, opts = {}){
+  const proj = loadAll()[id] || buildProject(id);
+  const meta = buildFakeRender(id, proj, { prior_mode: opts.prior_mode });
+  return { wav: meta.wav, peaks: meta.peaks, duration_s: meta.duration_s,
+           prior_mode: opts.prior_mode || 'bend' };
+}
+
 // ---------- fake audio synthesis (data: URL wav + peaks) ----------
 const FAKE_SR = 8000, FAKE_BPS = 100;
 

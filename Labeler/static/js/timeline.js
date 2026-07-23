@@ -73,14 +73,6 @@ export function noteRect(note){
   return { x, y: yc - h / 2, w, h };
 }
 
-export function velBarRect(note){
-  const x = timeToX(note.start_s);
-  const w = Math.max(2, (note.end_s - note.start_s) * store.view.pxPerSec);
-  const frac = clamp(note.velocity / 127, 0, 1);
-  const h = frac * (layout.velH - 4);
-  return { x, y: layout.velH - h, w, h };
-}
-
 // ---------- pan / zoom (not undoable) ----------
 export function clampView(){
   const dur = durationS();

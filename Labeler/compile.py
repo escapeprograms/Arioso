@@ -18,7 +18,8 @@ Per verified clip ``<id>`` we write, under :attr:`CompileParams.root`:
 * ``onsets/<id>.npy`` — ``[K]`` int32 onset frames.
 * ``offsets/<id>.npy`` — ``[K]`` int32 note-offset frames (Arioso's sinusoidal
   boundary-distance conditioning reads these alongside ``onsets/``).
-* ``cond/{articulation,velocity,vibrato}/<id>.npy`` — ``[T]`` uint8 conditioning tracks.
+* ``cond/{articulation,vibrato}/<id>.npy`` — ``[T]`` uint8 conditioning tracks. (Per-note
+  dynamics are baked into ``prior_mel`` via ``env_dct`` — there is no velocity cond track.)
 
 **Notes already live in cleaned-audio time** (the align stage baked the offset into
 ``notes.json``), so every rasterizer runs at ``offset_s = 0``. Notes whose midpoint
@@ -57,7 +58,7 @@ from common.dataset_schema import (ARTICULATIONS, DIR_GT, DIR_OFFSETS, DIR_ONSET
                                    MANIFEST_JSON, MANIFEST_SCHEMA_VERSION,
                                    NoteEvent, cond_dir, load_manifest,
                                    offset_frames, onset_frames, rasterize_articulation,
-                                   rasterize_velocity, rasterize_vibrato,
+                                   rasterize_vibrato,
                                    write_manifest)
 from common.prior import quantized_prior
 from common.vocoder import mel_frames
@@ -69,7 +70,7 @@ from .midi_io import notes_to_pretty_midi
 
 # Root-wide manifest identity for the human ground-truth corpus.
 ROOT_NAME = "gt_arky"
-SIGNALS = ["articulation", "velocity", "vibrato"]
+SIGNALS = ["articulation", "vibrato"]
 
 
 # --- mute regions ---------------------------------------------------------------
@@ -115,8 +116,9 @@ def notes_hash(notes: list[dict], mute_regions: list[dict]) -> str:
     """SHA-1 over a canonical dump of the fields that determine the compiled output.
 
     Canonical form: the notes list reduced to ``{start_s, end_s, pitch, velocity,
-    technique, vibrato}`` (times rounded to 1e-6 s to match ``notes.json``'s own
-    rounding) plus the mute regions reduced to ``{start_s, end_s}``, serialized with
+    technique, vibrato, env_dct}`` (times rounded to 1e-6 s to match ``notes.json``'s own
+    rounding; env_dct coeffs to 1e-4) plus the mute regions reduced to ``{start_s, end_s}``,
+    serialized with
     ``sort_keys=True``. Any edit that changes what the compile emits changes this digest;
     cosmetic fields (``id``, ``auto`` block, ``human`` flags, ``slur_group``) do not.
     """
@@ -129,6 +131,7 @@ def notes_hash(notes: list[dict], mute_regions: list[dict]) -> str:
                 "velocity": int(n["velocity"]),
                 "technique": str(n["technique"]),
                 "vibrato": bool(n.get("vibrato", False)),
+                "env_dct": [round(float(x), 4) for x in n["env_dct"]] if n.get("env_dct") else None,
             }
             for n in notes
         ],
@@ -152,7 +155,6 @@ def _artifact_paths(root: str, base: str) -> dict[str, str]:
         "onsets": os.path.join(root, DIR_ONSETS, base + ".npy"),
         "offsets": os.path.join(root, DIR_OFFSETS, base + ".npy"),
         "articulation": os.path.join(root, cond_dir("articulation"), base + ".npy"),
-        "velocity": os.path.join(root, cond_dir("velocity"), base + ".npy"),
         "vibrato": os.path.join(root, cond_dir("vibrato"), base + ".npy"),
     }
 
@@ -252,7 +254,8 @@ def compile_one(cfg: LabelerConfig, clip_id: str, manifest: dict,
     events = [
         NoteEvent(start_s=float(n["start_s"]), end_s=float(n["end_s"]),
                   pitch=int(n["pitch"]), velocity=int(n["velocity"]),
-                  articulation=str(n["technique"]), vibrato=bool(n.get("vibrato", False)))
+                  articulation=str(n["technique"]), vibrato=bool(n.get("vibrato", False)),
+                  env_dct=tuple(n["env_dct"]) if n.get("env_dct") else None)
         for n in survivors
     ]
 
@@ -272,19 +275,18 @@ def compile_one(cfg: LabelerConfig, clip_id: str, manifest: dict,
     target_mel = mel_frames(y)
     n_frames = int(target_mel.shape[1])
 
-    # -- prior: surviving notes (real velocities) -> in-memory score -> mel --
-    pm = notes_to_pretty_midi(survivors, tempo=cp.tempo, program=cp.program)
+    # -- prior: surviving notes -> in-memory score (env_dct baked per note) -> mel --
+    pm = notes_to_pretty_midi(survivors, tempo=cp.tempo, program=cp.program, with_env=True)
     prior_wav = quantized_prior().render(pm, total_samples=n_samples)
     prior_mel = mel_frames(prior_wav)
     if prior_mel.shape[1] != n_frames:
         raise AssertionError(
             f"{clip_id}: prior_mel T={prior_mel.shape[1]} != target_mel T={n_frames}")
 
-    # -- onsets + offsets + three conditioning tracks (notes already in cleaned-audio time) --
+    # -- onsets + offsets + two conditioning tracks (notes already in cleaned-audio time) --
     onsets = onset_frames(events, n_frames)
     offs = offset_frames(events, n_frames)
     artic = rasterize_articulation(events, n_frames)
-    vel = rasterize_velocity(events, n_frames)
     vib = rasterize_vibrato(events, n_frames)
 
     # -- write artifacts (manifest is committed by the caller, after these succeed) --
@@ -297,7 +299,6 @@ def compile_one(cfg: LabelerConfig, clip_id: str, manifest: dict,
     np.save(paths["onsets"], onsets.astype(np.int32))
     np.save(paths["offsets"], offs.astype(np.int32))
     np.save(paths["articulation"], artic.astype(np.uint8))
-    np.save(paths["velocity"], vel.astype(np.uint8))
     np.save(paths["vibrato"], vib.astype(np.uint8))
 
     manifest.setdefault("clips", {})[clip_id] = {

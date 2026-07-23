@@ -1,5 +1,5 @@
 // interact.js — pointer + wheel handling on the stage: pan/zoom, click-select,
-// playhead scrubbing, note drag-edit (move / re-pitch / resize), velocity-lane drag,
+// playhead scrubbing, note drag-edit (move / re-pitch / resize),
 // mute-region painting on the ruler, double-click create, and minimap navigation.
 import {
   store, apply, select, setPlayhead, clamp, pitchName, noteById, notesSorted, nextNote,
@@ -106,13 +106,11 @@ function onDown(e){
   if (band === 'onset'){ setPlayhead(t); ptr = { mode: 'scrub' }; return; }
 
   if (band === 'vel'){
+    // Envelope lane: click selects the note under the cursor (velocity is edited
+    // via the inspector #insp-vel field). No drag-to-edit on this lane.
     const n = noteAtTime(t);
-    if (n){
-      select(n.id);
-      const vel = velFromY(y);
-      store.drag = { kind: 'vel', id: n.id, preview: vel };
-      ptr = { mode: 'vel', id: n.id };
-    } else ptr = { mode: 'idle' };
+    if (n) select(n.id);
+    ptr = { mode: 'idle' };
     return;
   }
 
@@ -133,11 +131,6 @@ function onDown(e){
   }
 }
 
-function velFromY(yInRoll){
-  const yv = yInRoll - layout.velTop;
-  return clamp(Math.round((1 - yv / layout.velH) * 127), 1, 127);
-}
-
 function onMove(e){
   const { x, y } = rollXY(e);
   const band = bandOf(y);
@@ -154,7 +147,6 @@ function onMove(e){
 
   if (ptr.mode === 'scrub'){ setPlayhead(clamp(xToTime(x), 0, durationS())); return; }
   if (ptr.mode === 'region'){ store.drag.cur = clamp(xToTime(x), 0, durationS()); return; }
-  if (ptr.mode === 'vel'){ store.drag.preview = velFromY(y); return; }
 
   if (ptr.mode === 'pending'){
     if (Math.hypot(e.clientX - ptr.sx, e.clientY - ptr.sy) < DRAG_PX) return;
@@ -204,8 +196,6 @@ function onUp(e){
     if (dStart !== 0 || dPitch !== 0) apply(edit.moveNote(p.id, dStart, dPitch, { phAfter: noteById(p.id).start_s + dStart }));
   } else if (p.mode === 'resize' && p.pending){
     if (p.pending.dSec !== 0) apply(edit.resizeNote(p.id, p.pending.dSec));
-  } else if (p.mode === 'vel' && store.drag){
-    apply(edit.setVelocity(p.id, store.drag.preview));
   } else if (p.mode === 'region' && store.drag){
     const a = store.drag.start, b = store.drag.cur;
     if (Math.abs(b - a) > 0.01) apply(edit.addMuteRegion({ start_s: a, end_s: b }));
