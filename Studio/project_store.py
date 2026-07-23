@@ -65,18 +65,24 @@ def default_render(cfg: StudioConfig) -> dict:
 
 def build_note(ordinal: int, *, start_beat: float, len_beats: float, pitch: int,
                velocity: int = 100, technique: str = "normal", pan: float = 0.0,
-               bend: list | None = None, vibrato: dict | None = None) -> dict:
+               bend: list | None = None, vibrato: dict | None = None,
+               env_dct: list | None = None) -> dict:
     """Assemble one note dict with schema defaults.
 
     ``bend`` is a piecewise-linear list of ``{"beat", "semitones"}`` control points
     relative to the note start (empty = no bend). ``vibrato`` is a
     ``{depth_semitones, rate_hz, onset_beats}`` block. ``pan`` is a bipolar
     ``-1.0..+1.0`` stereo position (project-only for now, like ``technique``).
+    ``env_dct`` is an *optional* ``[c0, c1, c2]`` energy envelope (velocity-coupled
+    cosine DCT coefficients). Unlike ``bend``, the key is **omitted entirely** when
+    absent (not written as an empty/None value): an absent ``env_dct`` means
+    velocity-derived flat fallback, and omitting the key keeps env-less documents
+    byte-stable (so their cache segment hashes never move — see D5/D6).
     """
     vib = default_vibrato()
     if vibrato:
         vib.update({k: float(v) for k, v in vibrato.items() if k in vib})
-    return {
+    note = {
         "id": note_id(ordinal),
         "start_beat": round(float(start_beat), 6),
         "len_beats": round(float(len_beats), 6),
@@ -87,6 +93,9 @@ def build_note(ordinal: int, *, start_beat: float, len_beats: float, pitch: int,
         "bend": list(bend) if bend else [],
         "vibrato": vib,
     }
+    if env_dct is not None:
+        note["env_dct"] = [round(float(x), 4) for x in env_dct]
+    return note
 
 
 def build_document(cfg: StudioConfig, project_id: str, *, name: str,
@@ -104,6 +113,7 @@ def build_document(cfg: StudioConfig, project_id: str, *, name: str,
         start_beat=n["start_beat"], len_beats=n["len_beats"], pitch=n["pitch"],
         velocity=n.get("velocity", 100), technique=n.get("technique", "normal"),
         pan=n.get("pan", 0.0), bend=n.get("bend"), vibrato=n.get("vibrato"),
+        env_dct=n.get("env_dct"),
     ) for i, n in enumerate(src)]
     return {
         "schema_version": SCHEMA_VERSION,

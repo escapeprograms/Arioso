@@ -26,7 +26,7 @@ model:
   lr_schedule: cosine       # post-warmup anneal shape
   lr_min: 2.0e-5            # LR floor at total_steps (10% of peak)
   warmup_steps: 2000        # linear ramp 0 -> lr before annealing starts
-  total_steps: 20000        # ~25 min of audio only — overfit risk; watch val curves
+  total_steps: 16000        # ~25 min of audio only — overfit risk; watch val curves
 
 run:
   data_roots: [Data/datasets/gt_arky]         # human ground truth alone (no synthetic bulk)

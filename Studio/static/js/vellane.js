@@ -5,7 +5,8 @@
 // read-only on notes that already carry a multi-point bend curve (edit those in the bend
 // editor). Every commit is one undoable command (setVelocities / setPans / setBendsFlat).
 import {
-  store, apply, isSelected, selectOnly, clamp, timeSig, notify,
+  store, apply, isSelected, selectOnly, clamp, timeSig, notify, noteById,
+  noteEnvCoeffs, envDb, cpFromCoeffs, coeffsFromCp,
 } from './state.js';
 import { beatToX, xToBeat, visibleNotes, visibleBeatRange } from './timeline.js';
 import * as edit from './editing.js';
@@ -14,10 +15,15 @@ import { techColor, shade, mix, SELECT_COL } from './render.js';
 const LANE_BG = '#1b2228';
 const PAD = 6;
 
+// ---------- envelope-mode constants ----------
+const ENV_DB_MIN = -30, ENV_DB_MAX = 16;   // fixed display range (mirrors Labeler env lane)
+const HITR = 7;                            // handle pick radius (px)
+const ENV_ROUND = 0.01;                    // dB rounding step while dragging
+
 let requestStatic = () => {};
 
 // ---------- mode state ----------
-const MODES = ['velocity', 'pan', 'pitch'];
+const MODES = ['velocity', 'pan', 'pitch', 'envelope'];
 export function setMode(m){
   if (!MODES.includes(m) || store.lane === m) { syncButtons(); return; }
   store.lane = m;
@@ -73,6 +79,9 @@ export function draw(g, w, h){
   for (let beat = firstBar; beat <= b1; beat += num){ const x = Math.round(beatToX(beat)) + 0.5; g.moveTo(x, 0); g.lineTo(x, h); }
   g.stroke();
 
+  // envelope mode owns its own rasterization (filled dB curves + handles); it never paints
+  if (mode === 'envelope'){ drawEnvelope(g, w, h); return; }
+
   // zero / center line for bipolar modes
   if (bipolar){
     g.strokeStyle = 'rgba(255,255,255,0.18)'; g.lineWidth = 1;
@@ -121,6 +130,111 @@ export function draw(g, w, h){
   g.globalAlpha = 1;
 }
 
+// ---------- envelope mode drawing ----------
+// dB <-> y with a PAD-px top margin (matches the velocity bars' top gap).
+function envDbToY(db, h){
+  const f = clamp((db - ENV_DB_MIN) / (ENV_DB_MAX - ENV_DB_MIN), 0, 1);
+  return h - f * (h - PAD);
+}
+function envDbFromY(y, h){
+  const f = clamp((h - y) / (h - PAD), 0, 1);
+  return ENV_DB_MIN + f * (ENV_DB_MAX - ENV_DB_MIN);
+}
+// trace the top curve across [x0, x0+bw] with lineTo (path started by the caller)
+function traceEnvTop(g, c, x0, bw, h){
+  for (let px = 0; px <= bw; px += 2) g.lineTo(x0 + px, envDbToY(envDb(c, bw > 0 ? px / bw : 0), h));
+  g.lineTo(x0 + bw, envDbToY(envDb(c, 1), h));   // exact endpoint at u=1
+}
+// the single note whose handles are live (envelope mode edits one selected note)
+function envSelNote(){ return store.selection.size === 1 ? noteById([...store.selection][0]) : null; }
+// hit-test the selected note's three handles; returns 0/1/2 or -1
+function hitHandle(n, x, y, h){
+  const c = noteEnvCoeffs(n);
+  const x0 = Math.round(beatToX(n.start_beat));
+  const bw = Math.max(2, Math.round(n.len_beats * store.view.px_per_beat));
+  const us = [0, 0.5, 1];
+  let best = -1, bestD = HITR * HITR;
+  for (let i = 0; i < 3; i++){
+    const hx = x0 + bw * us[i], hy = envDbToY(envDb(c, us[i]), h);
+    const d = (hx - x) * (hx - x) + (hy - y) * (hy - y);
+    if (d <= bestD){ bestD = d; best = i; }
+  }
+  return best;
+}
+function drawEnvelope(g, w, h){
+  // preview coeffs during a live drag (aliases the in-place drag.coeffs array)
+  const preview = (store.drag && store.drag.kind === 'lane' && store.drag.mode === 'envelope') ? store.drag.preview : null;
+  const selNote = envSelNote();
+
+  // soft gridlines: 0 dB and the corpus-median level (5.4 dB) as visual anchors.
+  // (The velocity map now spans the full display range, so its edges ARE the lane edges.)
+  g.lineWidth = 1;
+  for (const [db, a] of [[0, 0.16], [5.4, 0.08]]){
+    const y = Math.round(envDbToY(db, h)) + 0.5;
+    g.strokeStyle = `rgba(255,255,255,${a})`;
+    g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
+  }
+
+  for (const n of visibleNotes()){
+    const hasEnv = Array.isArray(n.env_dct) && n.env_dct.length >= 3;
+    let c = noteEnvCoeffs(n);
+    if (preview && preview[n.id]) c = preview[n.id];
+    const x0 = Math.round(beatToX(n.start_beat));
+    const bw = Math.max(2, Math.round(n.len_beats * store.view.px_per_beat));
+    const sel = isSelected(n.id);
+    const base = techColor(n.technique);
+    const col = sel ? mix(base, SELECT_COL, 0.6) : base;
+
+    // filled region from lane bottom up to the curve; env-less notes dimmed to 0.5x
+    g.globalAlpha = (sel ? 1 : 0.82) * (hasEnv ? 1 : 0.5);
+    g.fillStyle = col;
+    g.beginPath();
+    g.moveTo(x0, h);
+    traceEnvTop(g, c, x0, bw, h);
+    g.lineTo(x0 + bw, h);
+    g.closePath(); g.fill();
+    g.globalAlpha = 1;
+
+    // top edge: white when selected; dashed + dim when env-less (velocity fallback)
+    if (sel || !hasEnv){
+      g.strokeStyle = sel ? '#fff' : col;
+      g.lineWidth = 1;
+      if (!hasEnv && !sel) g.setLineDash([3, 2]);
+      g.beginPath();
+      g.moveTo(x0, envDbToY(envDb(c, 0), h));
+      traceEnvTop(g, c, x0, bw, h);
+      g.stroke();
+      g.setLineDash([]);
+    }
+  }
+
+  // handles (u=0/0.5/1) on the selected note only; dragged one larger + white
+  if (selNote){
+    let c = noteEnvCoeffs(selNote);
+    if (preview && preview[selNote.id]) c = preview[selNote.id];
+    const x0 = Math.round(beatToX(selNote.start_beat));
+    const bw = Math.max(2, Math.round(selNote.len_beats * store.view.px_per_beat));
+    const dragIdx = (drag && drag.mode === 'envelope' && drag.id === selNote.id) ? drag.pointIdx : -1;
+    const us = [0, 0.5, 1];
+    for (let i = 0; i < 3; i++){
+      const hx = x0 + bw * us[i], hy = envDbToY(envDb(c, us[i]), h);
+      g.beginPath(); g.arc(hx, hy, i === dragIdx ? 5 : 3.4, 0, Math.PI * 2);
+      g.fillStyle = i === dragIdx ? '#fff' : '#ffcf6b'; g.fill();
+      g.strokeStyle = 'rgba(0,0,0,0.7)'; g.lineWidth = 1; g.stroke();
+    }
+    // dB value label near the dragged handle (bendedit style)
+    if (dragIdx >= 0){
+      const u = us[dragIdx];
+      const hx = x0 + bw * u, hy = envDbToY(envDb(c, u), h);
+      const db = envDb(c, u);
+      const txt = (db >= 0 ? '+' : '') + db.toFixed(2) + ' dB';
+      g.fillStyle = 'rgba(0,0,0,0.8)'; g.fillRect(hx + 6, hy - 14, 58, 13);
+      g.fillStyle = '#ffd479'; g.font = '10px ui-monospace,monospace'; g.textBaseline = 'middle';
+      g.fillText(txt, hx + 9, hy - 7);
+    }
+  }
+}
+
 // ---------- value <-> y ----------
 function valueFromY(y, mode, h){
   if (mode === 'velocity') return clamp(Math.round((1 - y / h) * 127), 1, 127);
@@ -148,23 +262,63 @@ function paintAt(x, y, h, select){
   drag.map[n.id] = valueFromY(y, mode, h);
 }
 function onDown(e){
-  if (e.button !== 0) return;
+  if (e.button !== 0) return;   // right-click is a no-op in every mode
   const lane = document.getElementById('lane');
   lane.setPointerCapture(e.pointerId);
   const { x, y, h } = xy(e);
+  if (store.lane === 'envelope'){ onDownEnv(x, y, h); return; }
   drag = { map: {}, mode: store.lane };
   store.drag = { kind: 'lane', mode: store.lane, preview: drag.map, hideIds: new Set() };
   paintAt(x, y, h, true);   // select the first note touched
   requestStatic();
 }
+// envelope mode NEVER paints: a handle hit arms a control-point drag; a miss click-selects
+// the note under the cursor (so its handles become grabbable on the next pointerdown).
+function onDownEnv(x, y, h){
+  const selNote = envSelNote();
+  if (selNote){
+    const idx = hitHandle(selNote, x, y, h);
+    if (idx >= 0){
+      const coeffs = [...noteEnvCoeffs(selNote)];
+      drag = { mode: 'envelope', id: selNote.id, pointIdx: idx, coeffs };
+      // store.drag.preview[id] MUST stay the same live object as drag.coeffs (alias)
+      store.drag = { kind: 'lane', mode: 'envelope', preview: { [selNote.id]: coeffs } };
+      requestStatic();
+      return;
+    }
+  }
+  const n = noteUnderBeat(xToBeat(x));
+  if (n) selectOnly(n.id);   // no drag armed; handles move to the newly selected note
+  requestStatic();
+}
 function onMove(e){
   if (!drag) return;
   const { x, y, h } = xy(e);
+  if (drag.mode === 'envelope'){
+    const db = clamp(Math.round(envDbFromY(y, h) / ENV_ROUND) * ENV_ROUND, ENV_DB_MIN, ENV_DB_MAX);
+    const cp = cpFromCoeffs(drag.coeffs);
+    if (drag.pointIdx === 0) cp.start = db;
+    else if (drag.pointIdx === 1) cp.mid = db;
+    else cp.end = db;
+    const next = coeffsFromCp(cp.start, cp.mid, cp.end);
+    // mutate the previewed array IN PLACE (never reassign — draw reads this same object)
+    drag.coeffs[0] = next[0]; drag.coeffs[1] = next[1]; drag.coeffs[2] = next[2];
+    requestStatic();
+    return;
+  }
   paintAt(x, y, h, false);
   requestStatic();
 }
 function onUp(e){
   if (!drag) return;
+  if (drag.mode === 'envelope'){
+    const d = drag; drag = null;
+    try { document.getElementById('lane').releasePointerCapture(e.pointerId); } catch {}
+    store.drag = null;
+    apply(edit.setEnv(d.id, d.coeffs));   // one atomic undoable command per gesture
+    requestStatic();
+    return;
+  }
   const { map, mode } = drag; drag = null;
   try { document.getElementById('lane').releasePointerCapture(e.pointerId); } catch {}
   store.drag = null;

@@ -310,6 +310,7 @@ async def import_midi_endpoint(project_id: str, request: Request):
         start_beat=n["start_beat"], len_beats=n["len_beats"], pitch=n["pitch"],
         velocity=n.get("velocity", 100), technique=n.get("technique", "normal"),
         pan=n.get("pan", 0.0), bend=n.get("bend"), vibrato=n.get("vibrato"),
+        env_dct=n.get("env_dct"),
     ) for i, n in enumerate(imported)]
 
     new_doc = dict(doc)

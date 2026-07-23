@@ -161,8 +161,9 @@ export const midiToHz = (m) => 440 * Math.pow(2, (m - 69) / 12);
 // Reconstruct the A-weighted loudness curve db(u) at normalized position u in 0..1
 // from env_dct [c0,c1,c2]:  db(u) = c0 + c1*cos(PI*u) + c2*cos(2*PI*u)
 //   (c0 level, c1 tilt, c2 arch).  Notes lacking env_dct fall back to a flat level
-// derived from velocity; VEL_C0_A/VEL_C0_B mirror common/envelope.py VEL_C0_A / VEL_C0_B.
-export const VEL_C0_A = 0.043620, VEL_C0_B = 1.6462;
+// derived from velocity; VEL_C0_A/VEL_C0_B mirror common/envelope.py VEL_C0_A / VEL_C0_B
+// (UI-anchored map: vel 1..127 -> -30..+16 dB, the envelope lanes' display range).
+export const VEL_C0_A = 46 / 126, VEL_C0_B = -30 - VEL_C0_A;
 export const envDb = (c, u) => c[0] + c[1] * Math.cos(Math.PI * u) + c[2] * Math.cos(2 * Math.PI * u);
 export function noteEnvCoeffs(n){
   return (Array.isArray(n.env_dct) && n.env_dct.length >= 3)

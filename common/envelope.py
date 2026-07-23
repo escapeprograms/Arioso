@@ -34,17 +34,20 @@ from common.config import HOP_SIZE as HOP, N_FFT, SR
 EPS = 1e-10       # dB-domain floor (matches the envelope experiment)
 ENV_K = 3         # number of cosine-basis coefficients (c0 level, c1 tilt, c2 arch)
 
-# --- velocity -> env_dct (CALIBRATED 2026-07-22) ---------------------------------
+# --- velocity -> env_dct (UI-anchored map, 2026-07-23) ---------------------------
 # Studio (and MIDI fallbacks) derive a flat env from velocity when no measured
-# envelope exists: env_dct = [VEL_C0_A * velocity + VEL_C0_B, 0, 0]. Calibrated by
-# OLS (np.polyfit) of measured note c0 on MIDI velocity, pooled over the verified
-# gt_arky corpus: 24 clips, 2589 notes, Pearson r(vel, c0) = 0.251 (velocity carries
-# little dynamic info, as expected). The gentle OLS slope (much shallower than the
-# raw c0 spread) is intentional and non-degenerate; it maps vel 100 -> 6.0 dB, near
-# the median c0 (5.4 dB). Only the slope matters — the prior's MaskedRMS level match
-# cancels the absolute c0 offset, so the intercept is cosmetic.
-VEL_C0_A = 0.043620    # dB per velocity step (OLS slope, gt_arky verified corpus)
-VEL_C0_B = 1.6462      # dB intercept (OLS; cancels under MaskedRMS)
+# envelope exists: env_dct = [VEL_C0_A * velocity + VEL_C0_B, 0, 0]. The map anchors
+# velocity 1..127 onto the envelope lanes' full display range (-30 .. +16 dB) so a
+# velocity-bar drag moves a note's level at exactly the same dB-per-pixel rate as the
+# envelope control points (both lanes share that display range). Velocity is a UI
+# *control*, not a measurement, so the perceptual span wins over the data-faithful
+# OLS fit used previously (2026-07-22 calibration: A=0.043620, B=1.6462 from 24
+# clips / 2589 notes, r(vel, c0)=0.251 — kept here for provenance; its ~5.5 dB total
+# span made the velocity bar feel ~8x slower than the envelope handles). vel 100 ->
+# ~6.1 dB, still near the corpus median c0 (5.4 dB). Only relative levels matter —
+# the prior's MaskedRMS level match cancels the absolute c0 offset.
+VEL_C0_A = 46.0 / 126.0            # dB per velocity step: (16 - -30) / (127 - 1)
+VEL_C0_B = -30.0 - VEL_C0_A        # vel 1 -> -30 dB, vel 127 -> +16 dB
 
 
 def loudness_db(y: np.ndarray, sr: int = SR) -> np.ndarray:

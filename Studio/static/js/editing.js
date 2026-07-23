@@ -2,7 +2,12 @@
 // selAfter?, phAfter? } consumed by state.apply(). Factories read current values at
 // construction time so create-then-apply immediately. All operate on arrays of ids so
 // multi-selection is first-class. Every inverse is exact.
-import { store, noteById, allocId, clamp } from './state.js';
+import { store, noteById, allocId, clamp, velFromC0, c0FromVel } from './state.js';
+
+// round a scalar to 4 decimal places (matches the bend-storage precision precedent)
+const r4 = (x) => Math.round(x * 1e4) / 1e4;
+// snapshot a note's env_dct as a fresh array, or null when the note carries no envelope
+const envSnap = (n) => (Array.isArray(n.env_dct) && n.env_dct.length >= 3) ? n.env_dct.slice() : null;
 
 const MIN_LEN = 0.03125;   // 1/128 note floor
 
@@ -74,25 +79,61 @@ export function resizeNotes(ids, edge, dBeat){
   };
 }
 
+// ---------- energy envelope (3-coefficient cosine, velocity-coupled) ----------
+// setEnv writes env_dct AND the coupled velocity in one atomic undoable command per
+// handle gesture. Velocity is a lossy VIEW of c0 (both the prior render and MIDI export
+// read velocity, so it must stay in sync) — this coupling is intentional; do not "fix" it.
+// The inverse restores BOTH env_dct (including its prior ABSENCE — the key is deleted so an
+// env-less note returns to exactly the velocity-fallback state) and velocity.
+export function setEnv(id, coeffs){
+  const n = noteById(id);
+  const old = { env: envSnap(n), vel: n.velocity };
+  const next = [r4(coeffs[0]), r4(coeffs[1]), r4(coeffs[2])];
+  const nv = velFromC0(coeffs[0]);
+  return {
+    label: 'envelope', selAfter: [id],
+    mutate(){ const m = noteById(id); m.env_dct = next.slice(); m.velocity = nv; },
+    invert(){ const m = noteById(id);
+      if (old.env) m.env_dct = old.env.slice(); else delete m.env_dct;
+      m.velocity = old.vel; },
+  };
+}
+
 // ---------- velocity ----------
+// Velocity writers also translate any existing envelope vertically (c0 <- c0FromVel(vel),
+// keeping c1/c2) so the coupled views stay consistent; env-less notes gain no env_dct
+// (they already render a flat velocity-derived curve). Both directions are exact inverses.
 export function setVelocity(ids, vel){
   const list = Array.isArray(ids) ? ids : [ids];
-  const old = list.map(id => ({ id, v: noteById(id).velocity }));
+  const old = list.map(id => { const n = noteById(id); return { id, v: n.velocity, env: envSnap(n) }; });
   const nv = clamp(Math.round(vel), 1, 127);
   return {
     label: 'velocity', selAfter: list,
-    mutate(){ for (const o of old) noteById(o.id).velocity = nv; },
-    invert(){ for (const o of old) noteById(o.id).velocity = o.v; },
+    mutate(){ for (const o of old){ const n = noteById(o.id);
+      n.velocity = nv;
+      if (o.env) n.env_dct = [r4(c0FromVel(nv)), o.env[1], o.env[2]];
+    } },
+    invert(){ for (const o of old){ const n = noteById(o.id);
+      n.velocity = o.v;
+      if (o.env) n.env_dct = o.env.slice(); else delete n.env_dct;
+    } },
   };
 }
 // per-note velocity map (for lane drag-paint ramps): {id: vel}
 export function setVelocities(map){
   const ids = Object.keys(map);
-  const old = ids.map(id => ({ id, v: noteById(id).velocity }));
+  const old = ids.map(id => { const n = noteById(id); return { id, v: n.velocity, env: envSnap(n) }; });
   return {
     label: 'velocity', selAfter: ids,
-    mutate(){ for (const id of ids) noteById(id).velocity = clamp(Math.round(map[id]), 1, 127); },
-    invert(){ for (const o of old) noteById(o.id).velocity = o.v; },
+    mutate(){ for (const o of old){ const n = noteById(o.id);
+      const nv = clamp(Math.round(map[o.id]), 1, 127);
+      n.velocity = nv;
+      if (o.env) n.env_dct = [r4(c0FromVel(nv)), o.env[1], o.env[2]];
+    } },
+    invert(){ for (const o of old){ const n = noteById(o.id);
+      n.velocity = o.v;
+      if (o.env) n.env_dct = o.env.slice(); else delete n.env_dct;
+    } },
   };
 }
 
@@ -134,6 +175,9 @@ export function sliceNote(id, atBeat){
     bend: JSON.parse(JSON.stringify(n.bend || [{ beat: 0, semitones: 0 }])),
     vibrato: JSON.parse(JSON.stringify(n.vibrato || { depth_semitones: 0, rate_hz: 5.5, onset_beats: 0.15 })),
   };
+  // carry the energy envelope onto the right half only when the source note has one
+  // (keeps env-less notes env-less so their segment hashes stay stable)
+  if (Array.isArray(n.env_dct) && n.env_dct.length >= 3) right.env_dct = n.env_dct.slice();
   return {
     label: 'slice', selAfter: [id, right.id], phAfter: atBeat,
     mutate(doc){ const m = noteById(id); m.len_beats = rel; doc.notes.push(right); },

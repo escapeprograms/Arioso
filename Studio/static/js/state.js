@@ -11,7 +11,7 @@ export const store = {
 
   selection: new Set(),   // selected note ids (multi-select)
   tool: 'draw',           // draw | select | delete | slice
-  lane: 'velocity',       // control-lane mode: velocity | pan | pitch
+  lane: 'velocity',       // control-lane mode: velocity | pan | pitch | envelope
   snap: 'step',           // snap.js key
   loop: { enabled: false, start_beat: 0, end_beat: 4 },
   clipboard: null,        // { notes:[{dBeat,pitch,len,velocity,technique,bend,vibrato}], minBeat }
@@ -169,6 +169,41 @@ export function nextOrdinal(){ return idCounter; }
 // ---------- generic helpers ----------
 export const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 export const midiToHz = (m) => 440 * Math.pow(2, (m - 69) / 12);
+
+// ---------- per-note energy envelope (shared by render + synth + lane) ----------
+// Mirrors Labeler/static/js/state.js:160-171 (kept verbatim so both apps agree).
+// Reconstruct the A-weighted loudness curve db(u) at normalized position u in 0..1 from
+// env_dct [c0,c1,c2]:  db(u) = c0 + c1*cos(PI*u) + c2*cos(2*PI*u)  (c0 level, c1 tilt,
+// c2 arch). Notes lacking env_dct fall back to a flat level derived from velocity;
+// VEL_C0_A/VEL_C0_B mirror common/envelope.py VEL_C0_A / VEL_C0_B (UI-anchored map:
+// vel 1..127 -> -30..+16 dB, the envelope lane's display range, so velocity drags and
+// envelope handles move a note's level at the same dB-per-pixel rate).
+export const VEL_C0_A = 46 / 126, VEL_C0_B = -30 - VEL_C0_A;
+export const envDb = (c, u) => c[0] + c[1] * Math.cos(Math.PI * u) + c[2] * Math.cos(2 * Math.PI * u);
+export function noteEnvCoeffs(n){
+  return (Array.isArray(n.env_dct) && n.env_dct.length >= 3)
+    ? n.env_dct
+    : [VEL_C0_A * n.velocity + VEL_C0_B, 0, 0];
+}
+
+// ---------- envelope <-> 3-control-point bijection (exact, lossless) ----------
+// Handle values are db(u) at u=0/0.5/1, so the curve always passes through all three.
+//   forward:  start = c0+c1+c2 ,  mid = c0-c2 ,  end = c0-c1+c2
+//   inverse:  c0 = (start+end)/4 + mid/2 ,  c1 = (start-end)/2 ,  c2 = (start+end)/4 - mid/2
+export function cpFromCoeffs(c){
+  return { start: c[0] + c[1] + c[2], mid: c[0] - c[2], end: c[0] - c[1] + c[2] };
+}
+export function coeffsFromCp(start, mid, end){
+  const c0 = (start + end) / 4 + mid / 2;
+  const c1 = (start - end) / 2;
+  const c2 = (start + end) / 4 - mid / 2;
+  return [c0, c1, c2];
+}
+// c0 (curve mean, dB) <-> velocity through the velocity->c0 fallback map. c0FromVel is the
+// forward map (same as noteEnvCoeffs's flat fallback); velFromC0 inverts it, rounded and
+// clamped to the MIDI 1..127 range (the velocity view pegs when c0 leaves the map span).
+export function velFromC0(c0){ return clamp(Math.round((c0 - VEL_C0_B) / VEL_C0_A), 1, 127); }
+export function c0FromVel(vel){ return VEL_C0_A * vel + VEL_C0_B; }
 
 const NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 export function pitchName(m){

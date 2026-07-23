@@ -23,7 +23,10 @@ from common.config import HOP_SIZE as HOP, SR  # canonical audio/mel contract
 
 # project.json schema version (bumped when the on-disk project shape changes).
 # v2: one-time cache invalidation for the env-shaped prior (velocity->env_dct baked in).
-SCHEMA_VERSION = 2
+# v3: velocity->c0 map re-anchored to the envelope display range (-30..+16 dB); env-less
+#     notes' fallback priors change level, and velocity is hashed but the map is not, so
+#     cached segments must be invalidated once.
+SCHEMA_VERSION = 3
 
 # Mel frame rate the model + saw prior are sampled at (hop 512 @ 44.1 kHz).
 FRAME_RATE = SR / HOP  # ~86.13 fps

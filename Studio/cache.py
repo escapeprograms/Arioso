@@ -15,6 +15,8 @@ Two design decisions worth stating up front:
   whole phrase in time without changing its content still hits cache — the rendered
   WAV is position-independent and gets placed at the right absolute offset only at
   stitch time. Bend/vibrato are already note-relative, so they need no adjustment.
+  A note's ``env_dct`` (energy envelope) is folded into the hash *conditionally* —
+  only when present — so pre-envelope projects keep their exact segment hashes.
 
 * **No per-segment renormalization.** :class:`common.prior.MaskedRMS`
   already normalizes each rendered segment's prior to the same ``-20`` dBFS voiced
@@ -131,6 +133,18 @@ def _canon_bend(bend) -> list[dict]:
     return pts
 
 
+def _canon_env(env):
+    """Canonicalize a ``[c0, c1, c2]`` energy envelope, or ``None`` if absent/invalid.
+
+    Mirrors :func:`_canon_bend`'s style: a valid 3-element list rounds to 6 dp; any
+    other value (``None``, wrong length) returns ``None`` so the caller can omit the
+    key entirely (see :func:`segment_hash` for why the key is conditional).
+    """
+    if not isinstance(env, (list, tuple)) or len(env) != 3:
+        return None
+    return [round(float(x), 6) for x in env]
+
+
 def _canon_vibrato(vib) -> dict:
     v = vib or {}
     return {"depth_semitones": round(float(v.get("depth_semitones", 0.0)), 6),
@@ -149,6 +163,13 @@ def segment_hash(segment_notes_: list[dict], bpm: float, time_sig: dict,
     Params folded in: ``bpm``, ``time_sig``, ``model``, ``checkpoint``,
     ``prior_mode``, ``schema_version`` and the cache ``knobs`` (gap/pad), so any of
     them changing invalidates every segment (expected — e.g. a BPM change).
+
+    Per-note fields hashed: ``pitch``, ``start_beat`` (segment-relative),
+    ``len_beats``, ``velocity``, ``technique``, ``bend``, ``vibrato``, ``pan`` and —
+    *conditionally* — ``env`` (the ``[c0, c1, c2]`` energy envelope), which is
+    included **only** for notes that carry an ``env_dct`` (D6). Omitting the key on
+    env-less notes keeps their segment hashes byte-identical to pre-envelope
+    projects; env-carrying notes intentionally re-hash.
     """
     notes = list(segment_notes_)
     base = min((float(n["start_beat"]) for n in notes), default=0.0)
@@ -157,16 +178,26 @@ def segment_hash(segment_notes_: list[dict], bpm: float, time_sig: dict,
         key=lambda n: (float(n["start_beat"]), int(n.get("pitch", 0)),
                        float(n["len_beats"]), str(n.get("id", ""))),
     )
-    canon_notes = [{
-        "pitch": int(n["pitch"]),
-        "start_beat": round(float(n["start_beat"]) - base, 6),
-        "len_beats": round(float(n["len_beats"]), 6),
-        "velocity": int(n.get("velocity", 100)),
-        "technique": str(n.get("technique", "normal")),
-        "bend": _canon_bend(n.get("bend")),
-        "vibrato": _canon_vibrato(n.get("vibrato")),
-        "pan": round(float(n.get("pan", 0.0)), 6),
-    } for n in ordered]
+    canon_notes = []
+    for n in ordered:
+        cn = {
+            "pitch": int(n["pitch"]),
+            "start_beat": round(float(n["start_beat"]) - base, 6),
+            "len_beats": round(float(n["len_beats"]), 6),
+            "velocity": int(n.get("velocity", 100)),
+            "technique": str(n.get("technique", "normal")),
+            "bend": _canon_bend(n.get("bend")),
+            "vibrato": _canon_vibrato(n.get("vibrato")),
+            "pan": round(float(n.get("pan", 0.0)), 6),
+        }
+        # Conditional "env" key (D6): only notes that actually carry an env_dct add
+        # it to the hash payload, so env-less projects keep their existing segment
+        # hashes (no global re-render). Env-carrying notes intentionally re-hash —
+        # their audio genuinely differs.
+        env = _canon_env(n.get("env_dct"))
+        if env is not None:
+            cn["env"] = env
+        canon_notes.append(cn)
 
     payload = {
         "notes": canon_notes,
