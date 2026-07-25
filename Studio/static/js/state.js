@@ -199,6 +199,24 @@ export function coeffsFromCp(start, mid, end){
   const c2 = (start + end) / 4 - mid / 2;
   return [c0, c1, c2];
 }
+// Solve coefficients so the curve passes through (0,start), (um,mid), (1,end) — the
+// generalization of coeffsFromCp to a movable mid point (coeffsFromCp == um=0.5).
+// Singular at um=0/1 (callers clamp um to [0.1, 0.9]).
+export function coeffsThroughPoint(start, end, um, mid){
+  const a = Math.cos(Math.PI * um), b = 2 * a * a - 1;
+  const c1 = (start - end) / 2;
+  const S = (start + end) / 2;
+  const c2 = (S + a * c1 - mid) / (1 - b);
+  return [S - c2, c1, c2];
+}
+// Interior extremum of db(u): db'(u)=0 at cos(PI*u) = -c1/(4*c2) when that ratio is in
+// [-1,1]; falls back to 0.5 (flat/monotone curves). This is where the mid handle sits.
+export function envMidU(c){
+  if (!c[2]) return 0.5;
+  const r = -c[1] / (4 * c[2]);
+  if (r < -1 || r > 1) return 0.5;
+  return Math.acos(r) / Math.PI;
+}
 // c0 (curve mean, dB) <-> velocity through the velocity->c0 fallback map. c0FromVel is the
 // forward map (same as noteEnvCoeffs's flat fallback); velFromC0 inverts it, rounded and
 // clamped to the MIDI 1..127 range (the velocity view pegs when c0 leaves the map span).

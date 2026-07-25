@@ -7,6 +7,7 @@ import {
   selectAll, clearSelection, selectedIds, invalidateSorted, notesSorted, setDirtyHandler,
 } from './state.js';
 import { layout, clampView, visibleBeatRange, durationBeats } from './timeline.js';
+import { gridSize } from './snap.js';
 import * as render from './render.js';
 import * as interact from './interact.js';
 import * as tools from './tools.js';
@@ -114,12 +115,22 @@ function foldViewIntoDoc(){
 // ---------- keymap actions ----------
 const actions = {
   undo(){ undo(); }, redo(){ redo(); },
-  copy(){ clipboard.copy(); flashStatus('copied ' + selectedIds().length); },
-  cut(){ clipboard.cut(); },
-  paste(){ clipboard.paste(store.playhead); },
+  copy(){ const ok = clipboard.copy(); flashStatus(ok ? 'copied ' + selectedIds().length : 'nothing to copy'); },
+  cut(){ const n = clipboard.cut(); flashStatus(n ? 'cut ' + n : 'nothing to cut'); },
+  paste(){ const n = clipboard.paste(store.playhead); flashStatus(n ? 'pasted ' + n : 'clipboard empty'); },
   selectAll(){ selectAll(); },
   deselect(){ clearSelection(); },
   deleteSelected(){ const ids = selectedIds(); if (ids.length) apply(edit.deleteNotes(ids)); },
+  nudgeTime(dir, fine){
+    const ids = selectedIds(); if (!ids.length) return false;
+    let g = gridSize() || 0.25;   // snap 'none' returns 0 -> fall back to one step
+    if (fine) g /= 4;
+    apply(edit.moveNotes(ids, dir * g, 0)); return true;
+  },
+  nudgePitch(dir, octave){
+    const ids = selectedIds(); if (!ids.length) return false;
+    apply(edit.moveNotes(ids, 0, dir * (octave ? 12 : 1))); return true;
+  },
   save(){ saveNow(); },
   render(){ rendermgr.render(); },
   playPause(){ transport.playPause(); },

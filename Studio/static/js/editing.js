@@ -99,6 +99,25 @@ export function setEnv(id, coeffs){
   };
 }
 
+// multi-id setEnv for the mass envelope lane drag: writes env_dct AND the coupled velocity
+// per note in one atomic gesture. The exact inverse restores each note's prior env_dct —
+// including its ABSENCE (env-less notes that gained an envelope have the key deleted again)
+// and its prior velocity. {id: [c0,c1,c2]}. selAfter overrides the post-command selection
+// (the lane drag commits only changed notes but must keep the full selection selected).
+export function setEnvs(map, selAfter){
+  const ids = Object.keys(map);
+  const old = ids.map(id => { const n = noteById(id); return { id, env: envSnap(n), vel: n.velocity }; });
+  const next = {};
+  for (const id of ids){ const c = map[id]; next[id] = [r4(c[0]), r4(c[1]), r4(c[2])]; }
+  return {
+    label: 'envelope', selAfter: selAfter || ids,
+    mutate(){ for (const id of ids){ const n = noteById(id); n.env_dct = next[id].slice(); n.velocity = velFromC0(next[id][0]); } },
+    invert(){ for (const o of old){ const n = noteById(o.id);
+      if (o.env) n.env_dct = o.env.slice(); else delete n.env_dct;
+      n.velocity = o.vel; } },
+  };
+}
+
 // ---------- velocity ----------
 // Velocity writers also translate any existing envelope vertically (c0 <- c0FromVel(vel),
 // keeping c1/c2) so the coupled views stay consistent; env-less notes gain no env_dct

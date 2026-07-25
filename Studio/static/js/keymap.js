@@ -17,6 +17,17 @@ export function dispatch(e){
   const shift = e.shiftKey;
   if (!actions) return false;
 
+  // Arrow keys nudge the selection: Left/Right by one grid step (Shift = fine, 1/4 step),
+  // Up/Down by a semitone (Ctrl = octave). Ctrl+Left/Right stay unbound. This runs before
+  // the Ctrl letter switch below, whose `default: return false` would otherwise swallow
+  // Ctrl+arrows. Nudge actions return false on an empty selection so the browser default runs.
+  switch (k){
+    case 'ArrowLeft':  return ctrl ? false : actions.nudgeTime(-1, shift);
+    case 'ArrowRight': return ctrl ? false : actions.nudgeTime(+1, shift);
+    case 'ArrowUp':    return actions.nudgePitch(+1, ctrl);
+    case 'ArrowDown':  return actions.nudgePitch(-1, ctrl);
+  }
+
   if (ctrl){
     switch (k.toLowerCase()){
       case 'z': shift ? actions.redo() : actions.undo(); return true;
