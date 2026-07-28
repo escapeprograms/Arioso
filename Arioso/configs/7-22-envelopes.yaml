@@ -30,4 +30,4 @@ model:
 
 run:
   data_roots: [Data/datasets/gt_arky]         # human ground truth alone (no synthetic bulk)
-  name: 7-22-envelopes
+  name: 7-25-suzuki-3

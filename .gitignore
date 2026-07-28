@@ -53,6 +53,10 @@ bigvgan_selftest_out.wav
 Arioso/models/
 Arioso/samples/
 
+# Vocoder fine-tuning runs + generated fine-tuning corpus (large, re-generatable)
+Vocoder/runs/
+Data/datasets/vocoder_ft/
+
 # ─────────────────────────────────────────────────────────────
 # Python
 # ─────────────────────────────────────────────────────────────
@@ -99,3 +103,4 @@ secrets.*
 .DS_Store
 Thumbs.db
 desktop.ini
+Vocoder/models/

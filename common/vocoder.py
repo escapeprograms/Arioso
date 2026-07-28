@@ -13,6 +13,14 @@ BigVGAN ships no PyPI package; the repo is vendored under ``external/BigVGAN``
 and added to ``sys.path`` here. Weights download from the HF Hub on first load
 and are cached thereafter.
 
+A fine-tuned checkpoint can be loaded instead of the HF baseline by pointing
+``load_vocoder`` at a local run dir — via the ``checkpoint_dir`` argument, or
+project-wide via ``common.config.VOCODER_DIR`` (the default, which selects the
+violin fine-tune). The dir must hold a ``config.json``
+(``ft_config.json`` accepted as a fallback) and either ``bigvgan_generator.pt``
+or a step-prefixed ``g_????????`` snapshot (the newest wins). The mel contract is
+asserted against the local config exactly as for the baseline.
+
 Self-test (round-trips a real clip mel -> waveform):
 
     python -m common.vocoder --selftest
@@ -27,7 +35,9 @@ import warnings
 import numpy as np
 import torch
 
-from common.config import SR, HOP_SIZE, N_FFT, WIN_SIZE, N_MELS, FMIN, FMAX
+from common.config import (
+    SR, HOP_SIZE, N_FFT, WIN_SIZE, N_MELS, FMIN, FMAX, VOCODER_DIR,
+)
 
 # The 44.1 kHz / 128-band / hop-512 checkpoint — the exact match for our config.
 CHECKPOINT = "nvidia/bigvgan_v2_44khz_128band_512x"
@@ -44,7 +54,8 @@ def _ensure_bigvgan_on_path() -> None:
         sys.path.insert(0, _BIGVGAN_DIR)
 
 
-def load_vocoder(device: str = "cpu", use_cuda_kernel: bool = False):
+def load_vocoder(device: str = "cpu", use_cuda_kernel: bool = False,
+                 checkpoint_dir: str | None = None):
     """Load the BigVGAN-v2 checkpoint, asserting it matches ``common.config``.
 
     Downloads the weights from the HF Hub on first call (cached thereafter).
@@ -56,6 +67,16 @@ def load_vocoder(device: str = "cpu", use_cuda_kernel: bool = False):
     model still runs on ``device`` (the GPU is not lost); only the fused-kernel
     speedup is skipped.
 
+    A local fine-tuned checkpoint is loaded instead of the HF baseline when a run
+    dir is given — resolved in order: the ``checkpoint_dir`` argument, else
+    ``common.config.VOCODER_DIR`` (the project default — the violin fine-tune;
+    set it to ``None`` there for the stock HF baseline). Passing
+    ``checkpoint_dir="hf"`` forces the stock HF baseline regardless of the
+    config. Local mode reads ``<dir>/config.json`` (or ``ft_config.json`` as a
+    fallback) and the ``<dir>/bigvgan_generator.pt`` weights, or the newest
+    step-prefixed ``g_????????`` snapshot; everything else — the mel-contract
+    assert, the weight-norm fold, ``eval().to(device)`` — is identical.
+
     We download config + weights directly rather than via BigVGAN's
     ``from_pretrained`` mixin: that mixin's ``_from_pretrained`` signature is
     pinned to an older ``huggingface_hub`` contract (it requires ``proxies`` /
@@ -63,17 +84,55 @@ def load_vocoder(device: str = "cpu", use_cuda_kernel: bool = False):
     it breaks on modern hub. This path replicates the same load and is
     version-independent.
     """
+    import glob
     import json
-
-    from huggingface_hub import hf_hub_download
 
     _ensure_bigvgan_on_path()
     import bigvgan
     from env import AttrDict
 
-    config_file = hf_hub_download(repo_id=CHECKPOINT, filename="config.json")
-    with open(config_file) as f:
-        h = AttrDict(json.load(f))
+    # Resolution order: explicit checkpoint_dir arg, else config.VOCODER_DIR
+    # (project default), else the HF Hub baseline checkpoint. checkpoint_dir="hf"
+    # forces the stock HF baseline regardless of the config (needed by A/B
+    # tooling that compares against the pretrained model).
+    if checkpoint_dir == "hf":
+        local_dir = None
+    else:
+        local_dir = checkpoint_dir or VOCODER_DIR or None
+
+    if local_dir:
+        # Local mode: a fine-tuned run dir. config.json is required (ft_config.json
+        # accepted as a fallback); weights are bigvgan_generator.pt, else the newest
+        # step-prefixed g_???????? snapshot.
+        source = local_dir
+        config_file = os.path.join(local_dir, "config.json")
+        if not os.path.isfile(config_file):
+            config_file = os.path.join(local_dir, "ft_config.json")
+        if not os.path.isfile(config_file):
+            raise FileNotFoundError(
+                f"BigVGAN local checkpoint dir {local_dir!r} has no config.json "
+                f"(or ft_config.json)"
+            )
+        with open(config_file) as f:
+            h = AttrDict(json.load(f))
+        weight_file = os.path.join(local_dir, "bigvgan_generator.pt")
+        if not os.path.isfile(weight_file):
+            snaps = sorted(glob.glob(os.path.join(local_dir, "g_" + "?" * 8)))
+            if not snaps:
+                raise FileNotFoundError(
+                    f"BigVGAN local checkpoint dir {local_dir!r} has no "
+                    f"bigvgan_generator.pt or g_???????? snapshot"
+                )
+            weight_file = snaps[-1]
+    else:
+        from huggingface_hub import hf_hub_download
+
+        source = CHECKPOINT
+        config_file = hf_hub_download(repo_id=CHECKPOINT, filename="config.json")
+        with open(config_file) as f:
+            h = AttrDict(json.load(f))
+        weight_file = hf_hub_download(
+            repo_id=CHECKPOINT, filename="bigvgan_generator.pt")
 
     # Fail loudly if the checkpoint's mel params drift from our shared contract.
     expected = {
@@ -85,7 +144,7 @@ def load_vocoder(device: str = "cpu", use_cuda_kernel: bool = False):
     }
     if mismatch:
         raise ValueError(
-            f"BigVGAN checkpoint {CHECKPOINT} mel params disagree with "
+            f"BigVGAN checkpoint {source} mel params disagree with "
             f"common.config (got, expected): {mismatch}"
         )
 
@@ -104,8 +163,6 @@ def load_vocoder(device: str = "cpu", use_cuda_kernel: bool = False):
         )
         model = bigvgan.BigVGAN(h, use_cuda_kernel=False)
 
-    weight_file = hf_hub_download(
-        repo_id=CHECKPOINT, filename="bigvgan_generator.pt")
     ckpt = torch.load(weight_file, map_location="cpu")
 
     # The freshly built model carries weight norm; the checkpoint may or may not.

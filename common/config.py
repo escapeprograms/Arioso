@@ -11,6 +11,8 @@ the prior-shape knobs live in ``common/prior.py``.
 
 from __future__ import annotations
 
+import os
+
 # Canonical audio format for every wav in the project: mono, 16-bit PCM, SR Hz.
 SR = 44100          # sample rate (Hz)
 DEFAULT_PEAK = 0.95  # default peak for audio_io.normalize (avoids clipping)
@@ -37,3 +39,14 @@ WIN_SIZE = 2048       # STFT window length (samples)
 N_MELS   = 128        # number of mel bands
 FMIN     = 0          # mel lower bound (Hz)
 FMAX     = None       # mel upper bound; None => SR / 2 (22050 Hz)
+
+# --- Vocoder checkpoint selection -----------------------------------------
+# Directory holding the active BigVGAN generator (config.json +
+# bigvgan_generator.pt). Points at the violin fine-tune (Arioso-mel adapted,
+# 2026-07-27, +2.5 dB MCD on Arioso-mel val) by default; set to None to use the
+# stock HF checkpoint (nvidia/bigvgan_v2_44khz_128band_512x). Overridable per
+# call via load_vocoder(checkpoint_dir=...). Missing dir fails loudly at load —
+# silently vocoding with the wrong checkpoint would just sound mysteriously
+# worse.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VOCODER_DIR: str | None = os.path.join(_REPO_ROOT, "Vocoder", "models", "ft_v1")

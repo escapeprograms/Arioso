@@ -39,7 +39,7 @@ import os
 import numpy as np
 import soundfile as sf
 
-from common.config import DEFAULT_PEAK, SR
+from common.config import DEFAULT_PEAK, SR, VOCODER_DIR
 
 from .config import SCHEMA_VERSION
 from .timing import beats_to_seconds
@@ -152,6 +152,21 @@ def _canon_vibrato(vib) -> dict:
             "onset_beats": round(float(v.get("onset_beats", 0.0)), 6)}
 
 
+def _vocoder_cache_id() -> str | None:
+    """Identity of the active vocoder for cache keying, or None for the HF stock.
+
+    ``common.config.VOCODER_DIR`` selects a local fine-tuned generator; its audio
+    genuinely differs from the stock checkpoint, so it must invalidate cached
+    segments. Returns ``"<dirname>:<generator size>"`` (size catches re-exported
+    weights under the same name), or None when the stock HF vocoder is active.
+    """
+    if not VOCODER_DIR:
+        return None
+    gen = os.path.join(VOCODER_DIR, "bigvgan_generator.pt")
+    size = os.path.getsize(gen) if os.path.isfile(gen) else 0
+    return f"{os.path.basename(os.path.normpath(VOCODER_DIR))}:{size}"
+
+
 def segment_hash(segment_notes_: list[dict], bpm: float, time_sig: dict,
                  model: str, checkpoint: str, prior_mode: str,
                  schema_version: int, knobs: dict) -> str:
@@ -161,8 +176,10 @@ def segment_hash(segment_notes_: list[dict], bpm: float, time_sig: dict,
     segment's earliest onset) so an unchanged phrase moved in time keeps its hash.
     Notes are sorted deterministically; floats rounded to 6 dp to kill FP noise.
     Params folded in: ``bpm``, ``time_sig``, ``model``, ``checkpoint``,
-    ``prior_mode``, ``schema_version`` and the cache ``knobs`` (gap/pad), so any of
-    them changing invalidates every segment (expected — e.g. a BPM change).
+    ``prior_mode``, ``schema_version``, the cache ``knobs`` (gap/pad) and — when a
+    local fine-tuned vocoder is active (``common.config.VOCODER_DIR``) — the
+    vocoder identity, so any of them changing invalidates every segment
+    (expected — e.g. a BPM change or a vocoder swap).
 
     Per-note fields hashed: ``pitch``, ``start_beat`` (segment-relative),
     ``len_beats``, ``velocity``, ``technique``, ``bend``, ``vibrato``, ``pan`` and —
@@ -210,6 +227,14 @@ def segment_hash(segment_notes_: list[dict], bpm: float, time_sig: dict,
         "knobs": {"gap_s": round(float(knobs["gap_s"]), 6),
                   "pad_s": round(float(knobs["pad_s"]), 6)},
     }
+    # Conditional "vocoder" key (same pattern as per-note "env"): only a local
+    # fine-tuned vocoder adds it, so stock-vocoder hashes stay byte-identical to
+    # historical ones (and revive their caches if config.VOCODER_DIR reverts to
+    # None). A fine-tuned vocoder intentionally re-hashes every segment — all
+    # cached audio predating it is stale.
+    voc = _vocoder_cache_id()
+    if voc is not None:
+        payload["vocoder"] = voc
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()
 
