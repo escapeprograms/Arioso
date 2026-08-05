@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 
 import pytest
 from fastapi.testclient import TestClient
 
+from Studio import library
 from Studio.config import load_config
 from Studio.server import create_app
 
@@ -76,6 +78,103 @@ def test_projects_crud_flow(client):
     # Fetch it back.
     got = client.get(f"/api/projects/{pid}")
     assert got.status_code == 200 and got.json()["project_id"] == pid
+
+
+def test_list_includes_modified(client):
+    client.post("/api/projects", json={"name": "Modded"})
+    listing = client.get("/api/projects").json()
+    assert len(listing) == 1
+    assert isinstance(listing[0]["modified"], (int, float)) and listing[0]["modified"] > 0
+
+
+def test_rename_bumps_rev_and_persists(client):
+    pid = client.post("/api/projects", json={"name": "Old"}).json()["project_id"]
+    r = client.post(f"/api/projects/{pid}/rename", json={"name": "New Name"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"status": "ok", "rev": 2, "name": "New Name"}
+    got = client.get(f"/api/projects/{pid}").json()
+    assert got["name"] == "New Name" and got["rev"] == 2
+
+
+def test_rename_unknown_404(client):
+    r = client.post("/api/projects/nope/rename", json={"name": "X"})
+    assert r.status_code == 404
+    assert r.json()["error"] == "project_not_found"
+
+
+def test_rename_requires_name(client):
+    pid = client.post("/api/projects", json={"name": "R"}).json()["project_id"]
+    r = client.post(f"/api/projects/{pid}/rename", json={"name": "   "})
+    assert r.status_code == 400
+    assert r.json()["error"] == "bad_request"
+
+
+def test_duplicate_defaults_name_and_copies_cache_not_mix(client):
+    cfg = client.app.state.cfg
+    pid = client.post("/api/projects", json={"name": "Orig"}).json()["project_id"]
+    # Seed a render tree: a content-keyed cache seg (copied) plus mix/meta/exports/backup
+    # (all intentionally NOT copied).
+    cache = library.render_cache_dir(cfg, pid)
+    os.makedirs(cache, exist_ok=True)
+    open(os.path.join(cache, "seg_abc123.wav"), "wb").write(b"RIFF")
+    rdir = library.render_dir(cfg, pid)
+    open(os.path.join(rdir, "mix.wav"), "wb").write(b"x")
+    open(os.path.join(rdir, "meta.json"), "w").write("{}")
+    exp = library.exports_dir(cfg, pid)
+    os.makedirs(exp, exist_ok=True)
+    open(os.path.join(exp, "a.wav"), "wb").write(b"x")
+    bdir = library.backup_dir(cfg, pid)
+    os.makedirs(bdir, exist_ok=True)
+    open(os.path.join(bdir, "rev_00001.json"), "w").write("{}")
+
+    r = client.post(f"/api/projects/{pid}/duplicate")
+    assert r.status_code == 201
+    dup = r.json()
+    new_id = dup["project_id"]
+    assert new_id != pid and dup["rev"] == 1 and dup["name"] == "Orig copy"
+    # cache seg copied ...
+    assert os.path.isfile(os.path.join(library.render_cache_dir(cfg, new_id), "seg_abc123.wav"))
+    # ... but the stitched mix / meta / exports / backups were not.
+    assert not os.path.exists(os.path.join(library.render_dir(cfg, new_id), "mix.wav"))
+    assert not os.path.exists(os.path.join(library.render_dir(cfg, new_id), "meta.json"))
+    assert not os.path.exists(library.exports_dir(cfg, new_id))
+    assert not os.path.exists(library.backup_dir(cfg, new_id))
+
+
+def test_duplicate_custom_name(client):
+    pid = client.post("/api/projects", json={"name": "Base"}).json()["project_id"]
+    dup = client.post(f"/api/projects/{pid}/duplicate", json={"name": "My Fork"}).json()
+    assert dup["name"] == "My Fork" and dup["rev"] == 1
+
+
+def test_duplicate_unknown_404(client):
+    r = client.post("/api/projects/nope/duplicate")
+    assert r.status_code == 404
+
+
+def test_delete_removes_project(client):
+    cfg = client.app.state.cfg
+    pid = client.post("/api/projects", json={"name": "Gone"}).json()["project_id"]
+    assert os.path.isdir(library.project_dir(cfg, pid))
+    r = client.delete(f"/api/projects/{pid}")
+    assert r.status_code == 200 and r.json()["status"] == "ok"
+    assert not os.path.exists(library.project_dir(cfg, pid))
+    assert client.get(f"/api/projects/{pid}").status_code == 404
+
+
+def test_delete_unknown_404(client):
+    r = client.delete("/api/projects/nope")
+    assert r.status_code == 404
+
+
+def test_delete_conflict_while_job_running(client):
+    pid = client.post("/api/projects", json={"name": "Busy"}).json()["project_id"]
+    # The api reads the JobManager off app.state.jobs; shadow is_running to force a 409.
+    client.app.state.jobs.is_running = lambda p: True
+    r = client.delete(f"/api/projects/{pid}")
+    assert r.status_code == 409
+    assert r.json()["error"] == "job_running"
 
 
 def test_create_requires_name(client):

@@ -84,10 +84,24 @@ class CacheParams:
     """Segment-cache knobs (used by the render/cache phase, declared here now).
 
     A cache segment is a maximal run of notes with no inter-note gap ``>= gap_s``,
-    padded ``pad_s`` into the silence on each side before rendering.
+    padded ``pad_s`` into the silence on each side before rendering. ``max_files`` /
+    ``max_mb`` bound the per-project ``render/cache/`` footprint — GC drops the
+    oldest stale (off-manifest) segment WAVs first by count, then by total size.
     """
     gap_s: float = 0.35
     pad_s: float = 0.1
+    max_files: int = 32
+    max_mb: float = 100.0
+
+
+@dataclass(frozen=True)
+class RetentionParams:
+    """Housekeeping knobs for the periodic maintenance sweep (:mod:`Studio.maintenance`).
+
+    ``backups_keep`` is the number of rolling ``project.backup/rev_*`` files retained
+    per project (both by the save-time roll and the sweep).
+    """
+    backups_keep: int = 8
 
 
 @dataclass
@@ -101,6 +115,7 @@ class StudioConfig:
     default_prior_mode: str = "bend"
     articulations: tuple[Articulation, ...] = _DEFAULT_ARTICULATIONS
     cache: CacheParams = field(default_factory=CacheParams)
+    retention: RetentionParams = field(default_factory=RetentionParams)
 
     # -- derived helpers --
     @property
@@ -221,7 +236,7 @@ def load_config(yaml_path: str | None = None) -> StudioConfig:
     base = StudioConfig()
     top_scalars = {"projects_root", "port", "models_root", "default_model",
                    "default_checkpoint", "default_prior_mode"}
-    valid_top = top_scalars | {"cache", "articulations"}
+    valid_top = top_scalars | {"cache", "retention", "articulations"}
     unknown = set(doc) - valid_top
     if unknown:
         raise ValueError(
@@ -236,6 +251,8 @@ def load_config(yaml_path: str | None = None) -> StudioConfig:
         kw["articulations"] = _parse_articulations(doc["articulations"], f"{yaml_path}:articulations")
     if "cache" in doc:
         kw["cache"] = _apply_group(base.cache, doc["cache"], f"{yaml_path}:cache")
+    if "retention" in doc:
+        kw["retention"] = _apply_group(base.retention, doc["retention"], f"{yaml_path}:retention")
 
     cfg = dataclasses.replace(base, **kw)
     if cfg.default_prior_mode not in PRIOR_MODES:

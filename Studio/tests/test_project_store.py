@@ -8,8 +8,8 @@ import os
 import pytest
 
 from Studio import project_store
-from Studio.config import load_config
-from Studio.library import BACKUP_DIR, project_dir
+from Studio.config import SCHEMA_VERSION, load_config
+from Studio.library import BACKUP_DIR, project_dir, render_cache_dir
 
 
 @pytest.fixture()
@@ -56,7 +56,7 @@ def test_build_note_clamps_velocity_and_keeps_bend():
 
 def test_build_document_defaults(cfg):
     doc = project_store.build_document(cfg, "song", name="My Song")
-    assert doc["schema_version"] == 1
+    assert doc["schema_version"] == SCHEMA_VERSION
     assert doc["project_id"] == "song"
     assert doc["rev"] == 0
     assert doc["name"] == "My Song"
@@ -96,6 +96,30 @@ def test_put_rolls_a_backup(cfg):
     bdir = os.path.join(project_dir(cfg, "songC"), BACKUP_DIR)
     backups = [f for f in os.listdir(bdir) if f.startswith("rev_")]
     assert len(backups) == 1  # the rev-1 doc was rolled before writing rev 2
+
+
+def test_set_name_bumps_rev_and_rolls_backup(cfg):
+    project_store.create_project(cfg, "ren", name="Orig")
+    doc = project_store.set_name(cfg, "ren", "Renamed")
+    assert doc["rev"] == 2 and doc["name"] == "Renamed"
+    assert project_store.load(cfg, "ren")["name"] == "Renamed"
+    bdir = os.path.join(project_dir(cfg, "ren"), BACKUP_DIR)
+    assert any(f.startswith("rev_") for f in os.listdir(bdir))
+    # Unknown id -> None (api layer turns it into a 404).
+    assert project_store.set_name(cfg, "nope", "x") is None
+
+
+def test_duplicate_new_id_rev1_and_copies_cache(cfg):
+    project_store.create_project(cfg, "orig", name="Orig")
+    cache = render_cache_dir(cfg, "orig")
+    os.makedirs(cache, exist_ok=True)
+    with open(os.path.join(cache, "seg_deadbeef.wav"), "wb") as f:
+        f.write(b"RIFF")
+    dup = project_store.duplicate(cfg, "orig", "Orig copy")
+    assert dup["project_id"] != "orig" and dup["rev"] == 1 and dup["name"] == "Orig copy"
+    assert os.path.isfile(os.path.join(render_cache_dir(cfg, dup["project_id"]),
+                                       "seg_deadbeef.wav"))
+    assert project_store.duplicate(cfg, "nope", "x") is None
 
 
 def test_summary_shape(cfg):

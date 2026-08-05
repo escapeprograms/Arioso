@@ -97,6 +97,7 @@ export async function listProjects(){
   return Object.values(map).map(p => ({
     id: p.project_id, name: p.name, rev: p.rev,
     bpm: p.bpm, n_notes: (p.notes || []).length,
+    modified: p._mtime || Date.now() / 1000,
   }));
 }
 
@@ -109,6 +110,7 @@ export async function createProject(body = {}){
   const p = buildProject(id, body.name || id);
   p.notes = [];                 // fresh projects start empty
   p.next_note_ordinal = 0;
+  p._mtime = Date.now() / 1000;
   map[id] = p; saveAll(map);
   return JSON.parse(JSON.stringify(p));
 }
@@ -128,8 +130,41 @@ export async function putProject(id, doc){
   const next = JSON.parse(JSON.stringify(doc));
   next.rev = ((cur && cur.rev) || doc.rev || 0) + 1;
   next.project_id = id;
+  next._mtime = Date.now() / 1000;
   map[id] = next; saveAll(map);
   return { rev: next.rev };
+}
+
+// ---------- rename / duplicate / delete ----------
+function notFound(){ const e = new Error('project_not_found'); e.status = 404; e.code = 'project_not_found'; return e; }
+
+export async function renameProject(id, name){
+  const map = loadAll();
+  const p = map[id];
+  if (!p) throw notFound();
+  p.name = name; p.rev = (p.rev || 0) + 1; p._mtime = Date.now() / 1000;
+  saveAll(map);
+  return { status: 'ok', rev: p.rev, name: p.name };
+}
+
+export async function duplicateProject(id, body = {}){
+  const map = loadAll();
+  const src = map[id];
+  if (!src) throw notFound();
+  const name = (body && body.name && body.name.trim()) || `${src.name} copy`;
+  const base = name.toString().trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'project';
+  let nid = base, i = 1; while (map[nid]) nid = `${base}-${++i}`;
+  const dup = JSON.parse(JSON.stringify(src));   // mock skips cache copying (no real cache)
+  dup.project_id = nid; dup.name = name; dup.rev = 1; dup._mtime = Date.now() / 1000;
+  map[nid] = dup; saveAll(map);
+  return JSON.parse(JSON.stringify(dup));
+}
+
+export async function deleteProject(id){
+  const map = loadAll();
+  if (!map[id]) throw notFound();
+  delete map[id]; saveAll(map);
+  return { status: 'ok' };
 }
 
 // ---------- render (simulated) ----------

@@ -71,7 +71,8 @@
       <div class="tb-spacer"></div>
 
       <!-- File group: MIDI import + WAV/MIDI export -->
-      <div class="file-group" title="Import / export">
+      <div class="file-group" title="Projects / import / export">
+        <button id="btn-projects" class="filebtn" title="Browse projects (open / new / rename / duplicate / delete)">Projects</button>
         <button id="btn-import" class="filebtn" title="Import a .mid file">Import</button>
         <button id="btn-export-wav" class="filebtn" title="Export the current render as WAV">WAV</button>
         <button id="btn-export-midi" class="filebtn" title="Export notes + bends as a .mid file">MIDI</button>
@@ -180,6 +181,21 @@
       <div class="modal-foot">
         <button id="import-cancel" class="filebtn">Cancel</button>
         <button id="import-go" class="render-btn"><span class="rlbl">Import</span></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= Projects modal ================= -->
+  <div class="modal-scrim" id="projects-modal" hidden>
+    <div class="modal projects-modal" role="dialog" aria-modal="true" aria-labelledby="projects-modal-title">
+      <div class="modal-head"><span id="projects-modal-title">Projects</span>
+        <button id="projects-cancel-x" class="dev-close" title="Close">&#10005;</button></div>
+      <div class="modal-body">
+        <div class="proj-list" id="proj-list"></div>
+      </div>
+      <div class="modal-foot">
+        <button id="proj-new" class="filebtn">New Project</button>
+        <button id="projects-close" class="render-btn"><span class="rlbl">Close</span></button>
       </div>
     </div>
   </div>

@@ -32,7 +32,13 @@ export function visibleBeatRange(){
 export const pitchToY = (pitch) => (store.view.top_pitch - pitch) * layout.rowH;
 export const yToPitchF = (y) => store.view.top_pitch - y / layout.rowH;             // fractional
 export const yToPitch = (y) => Math.round(store.view.top_pitch - y / layout.rowH - 0.5) + 0; // row -> integer pitch
-export function pitchRowAt(y){ return store.view.top_pitch - Math.floor(y / layout.rowH); }
+// clamp to the visible rows so ruler-edge clicks can't produce out-of-view pitches
+export function pitchRowAt(y){
+  const row = store.view.top_pitch - Math.floor(y / layout.rowH);
+  const hi = Math.min(PITCH_HI, store.view.top_pitch);
+  const lo = Math.max(PITCH_LO, store.view.top_pitch - Math.ceil(visibleRows()) + 1);
+  return clamp(row, lo, hi);
+}
 export function visiblePitchRange(){
   const top = store.view.top_pitch;
   const bottom = Math.floor(top - visibleRows());

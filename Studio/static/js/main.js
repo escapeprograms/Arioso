@@ -21,6 +21,7 @@ import * as vibrato from './vibrato.js';
 import * as devopts from './devopts.js';
 import * as rendermgr from './rendermgr.js';
 import * as io from './io.js';
+import * as projects from './projects.js';
 import { player } from './player.js';
 
 const $ = (id) => document.getElementById(id);
@@ -45,6 +46,7 @@ async function boot(){
   devopts.init();
   rendermgr.init({ flashStatus, setStatus, requestStatic, flushSave });
   io.init({ flashStatus, setStatus, reloadProject });
+  projects.init({ openProject, flashStatus, setStatus });
   setDirtyHandler(scheduleSave);
 
   subscribe(onStoreChange);
@@ -62,13 +64,30 @@ async function boot(){
 }
 
 // ---------- project loading ----------
+const LAST_PROJECT_KEY = 'studio.lastProject';
+
 async function loadProject(){
   const list = await api.listProjects().catch(() => []);
   // /api/projects summaries use `id` (project_store.summary); tolerate `project_id` too.
-  let id = (list[0] && (list[0].id || list[0].project_id)) || null;
+  const ids = list.map(p => p.id || p.project_id);
+  const saved = (() => { try { return localStorage.getItem(LAST_PROJECT_KEY); } catch { return null; } })();
+  let id = (saved && ids.includes(saved)) ? saved : (ids[0] || null);
   if (!id){ const p = await api.createProject({ name: 'My Song' }); id = p.project_id; }
+  await openProject(id);
+}
+
+// Switch the editor to project `id`: flush the current save (abort the switch if it errors,
+// so we never abandon unsaved edits), stop playback, and load the new document. Returns
+// true on success, false if aborted. The projects browser and initial load both route
+// through here so store.projectId / the remembered-last-project key stay consistent.
+async function openProject(id){
+  await flushSave();
+  if (store.save.state === 'error'){ flashStatus('save failed — not switching'); return false; }
+  player.pause();
   store.projectId = id;
+  try { localStorage.setItem(LAST_PROJECT_KEY, id); } catch {}
   applyLoadedDoc(await api.getProject(id));
+  return true;
 }
 
 // Re-fetch the current project and reset the editor to it (used after a MIDI import

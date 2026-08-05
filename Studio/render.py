@@ -76,9 +76,6 @@ def _prior_lock(project_id: str) -> threading.Lock:
 # Silence written for an empty project (no notes) so the mix.wav is a valid file.
 _EMPTY_SILENCE_S = 0.05
 
-# Cap on cached segment WAVs kept per project (GC drops the oldest stale ones).
-_MAX_CACHE_FILES = 64
-
 
 def _emit(progress, stage: str, pct: int, message: str = "",
           state: str = "processing", **extra) -> None:
@@ -283,8 +280,9 @@ def run_render(cfg, doc: dict, project_dir: str, *, scope: str = "phrase",
     write_pcm16(wav_path, mix)
     write_peaks(mix, os.path.join(rdir, MIX_PEAKS))
 
-    # GC stale cache WAVs (keep the current manifest + a rolling budget).
-    prune_cache(cache_dir, {s["hash"] for s in segments}, max_files=_MAX_CACHE_FILES)
+    # GC stale cache WAVs (keep the current manifest + a rolling count/size budget).
+    prune_cache(cache_dir, {s["hash"] for s in segments},
+                max_files=cfg.cache.max_files, max_mb=cfg.cache.max_mb)
 
     touched = 0
     seg_manifest = []

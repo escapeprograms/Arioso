@@ -15,6 +15,8 @@ support) is served by a StaticFiles mount in the server, not here. Torch-free.
 from __future__ import annotations
 
 import os
+import shutil
+import time
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -25,8 +27,8 @@ from . import project_store
 from .config import FRAME_RATE, PRIOR_MODES
 from .export import RenderStale, export_midi, export_wav
 from .jobs import idle_status
-from .library import (models_root, project_dir, project_exists, read_json,
-                      render_meta_file, scan_models, scan_project_ids,
+from .library import (models_root, project_dir, project_exists, project_file,
+                      read_json, render_meta_file, scan_models, scan_project_ids,
                       unique_project_id)
 from .midi_import import BadMidi, import_midi
 
@@ -86,7 +88,12 @@ def list_projects(request: Request):
     for pid in scan_project_ids(cfg):
         doc = project_store.load(cfg, pid)
         if doc is not None:
-            out.append(project_store.summary(doc))
+            entry = project_store.summary(doc)
+            try:
+                entry["modified"] = os.path.getmtime(project_file(cfg, pid))
+            except OSError:
+                entry["modified"] = 0.0
+            out.append(entry)
     return out
 
 
@@ -104,6 +111,67 @@ async def create_project(request: Request):
     pid = unique_project_id(cfg, name.strip())
     doc = project_store.create_project(cfg, pid, name=name.strip())
     return JSONResponse(doc, status_code=201)
+
+
+# --- rename / duplicate / delete --------------------------------------------
+
+@router.post("/api/projects/{project_id}/rename")
+async def rename_project(project_id: str, request: Request):
+    cfg = _cfg(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body or {}
+    name = body.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return _err(400, "bad_request", "a non-empty 'name' string is required")
+    doc = project_store.set_name(cfg, project_id, name.strip())
+    if doc is None:
+        return _err(404, "project_not_found", project_id)
+    return {"status": "ok", "rev": doc["rev"], "name": doc["name"]}
+
+
+@router.post("/api/projects/{project_id}/duplicate")
+async def duplicate_project(project_id: str, request: Request):
+    cfg = _cfg(request)
+    src = project_store.load(cfg, project_id)
+    if src is None:
+        return _err(404, "project_not_found", project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body or {}
+    name = body.get("name")
+    if not isinstance(name, str) or not name.strip():
+        name = f"{src.get('name', 'project')} copy"
+    doc = project_store.duplicate(cfg, project_id, name.strip())
+    if doc is None:                                 # raced away between load and copy
+        return _err(404, "project_not_found", project_id)
+    return JSONResponse(doc, status_code=201)
+
+
+@router.delete("/api/projects/{project_id}")
+def delete_project(project_id: str, request: Request):
+    cfg = _cfg(request)
+    jobs = _jobs(request)
+    if not project_exists(cfg, project_id):
+        return _err(404, "project_not_found", project_id)
+    if jobs.is_running(project_id):
+        return _err(409, "job_running", "a render is in progress for this project")
+    pdir = project_dir(cfg, project_id)
+    with project_store.lock_for(project_id):
+        for attempt in range(3):                    # Windows can hold transient handles
+            try:
+                shutil.rmtree(pdir)
+                break
+            except OSError:
+                if attempt == 2:
+                    return _err(500, "delete_failed",
+                                "could not remove the project directory")
+                time.sleep(0.2)
+    return {"status": "ok"}
 
 
 # --- single project get / put -----------------------------------------------

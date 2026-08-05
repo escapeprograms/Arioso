@@ -30,6 +30,9 @@ export const listProjects  = ()          => MOCK ? mock.listProjects()      : j(
 export const createProject = (body = {}) => MOCK ? mock.createProject(body)  : j('POST', '/api/projects', body);
 export const getProject    = (id)        => MOCK ? mock.getProject(id)       : j('GET', `/api/projects/${id}`);
 export const putProject    = (id, doc)   => MOCK ? mock.putProject(id, doc)  : j('PUT', `/api/projects/${id}`, doc);
+export const renameProject    = (id, name)     => MOCK ? mock.renameProject(id, name)    : j('POST', `/api/projects/${id}/rename`, { name });
+export const duplicateProject = (id, body = {}) => MOCK ? mock.duplicateProject(id, body) : j('POST', `/api/projects/${id}/duplicate`, body);
+export const deleteProject    = (id)           => MOCK ? mock.deleteProject(id)           : j('DELETE', `/api/projects/${id}`);
 
 // ---------- render (Phase 3/4; returns not_implemented in mock/Phase 1) ----------
 export const startRender     = (id, opts = {}) => MOCK ? mock.startRender(id, opts)   : j('POST', `/api/projects/${id}/render`, opts);

@@ -340,12 +340,21 @@ def stitch(segments: list[dict], cache_dir: str, total_duration_s: float,
 
 # --- garbage collection -----------------------------------------------------
 
-def prune_cache(cache_dir: str, keep_hashes, max_files: int = 64) -> list[str]:
-    """Delete stale ``seg_*.wav`` beyond ``max_files``; keep ``keep_hashes`` always.
+def prune_cache(cache_dir: str, keep_hashes, max_files: int = 64,
+                max_mb: float | None = None) -> list[str]:
+    """Delete stale ``seg_*.wav`` beyond the file-count / size budget; keep manifest always.
 
-    Segments in ``keep_hashes`` (the current manifest) are never deleted. Among the
-    remaining (stale) segment WAVs, the newest are kept up to the ``max_files`` total
-    budget and the rest are removed. Returns the list of deleted filenames.
+    Segments in ``keep_hashes`` (the current manifest) are never deleted. Pruning runs
+    in two passes over the remaining (stale) WAVs, oldest-mtime dropped first:
+
+    * **count** — the newest stale WAVs are kept up to the ``max_files`` total budget
+      (manifest + stale) and the rest are removed.
+    * **size** — when ``max_mb`` is not ``None``, the remaining ``seg_*.wav`` total is
+      summed and stale WAVs are dropped oldest-first while it exceeds ``max_mb`` MB.
+      Manifest files are never dropped, so the total can legitimately stay over budget
+      when the manifest alone exceeds it.
+
+    Returns the list of deleted filenames (both passes).
     """
     if not os.path.isdir(cache_dir):
         return []
@@ -357,6 +366,7 @@ def prune_cache(cache_dir: str, keep_hashes, max_files: int = 64) -> list[str]:
             continue
         h = f[len(SEG_PREFIX):-len(SEG_SUFFIX)]
         (kept if h in keep else stale).append(f)
+    # Newest first, so slicing/keeping from the front retains the freshest WAVs.
     stale.sort(key=lambda f: os.path.getmtime(os.path.join(cache_dir, f)), reverse=True)
     allowed = max(0, max_files - len(kept))
     deleted: list[str] = []
@@ -366,4 +376,27 @@ def prune_cache(cache_dir: str, keep_hashes, max_files: int = 64) -> list[str]:
             deleted.append(f)
         except OSError:
             pass
+    surviving_stale = stale[:allowed]
+
+    # Size pass: drop the oldest surviving stale WAV until the total (manifest +
+    # stale) is under budget. Manifest files are never touched.
+    if max_mb is not None:
+        def _size(f: str) -> int:
+            try:
+                return os.path.getsize(os.path.join(cache_dir, f))
+            except OSError:
+                return 0
+
+        budget = max_mb * 1e6
+        total = sum(_size(f) for f in kept) + sum(_size(f) for f in surviving_stale)
+        # Oldest last so we can pop() the oldest surviving stale WAV each iteration.
+        while total > budget and surviving_stale:
+            f = surviving_stale.pop()      # oldest-mtime stale (list is newest-first)
+            sz = _size(f)
+            try:
+                os.remove(os.path.join(cache_dir, f))
+                deleted.append(f)
+                total -= sz
+            except OSError:
+                pass
     return deleted

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import mimetypes
 import os
+import threading
 
 import uvicorn
 from fastapi import FastAPI
@@ -33,6 +34,7 @@ from .api import router
 from .config import StudioConfig, load_config
 from .jobs import JobManager
 from .library import projects_root
+from .maintenance import sweep_projects
 
 _STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
@@ -74,6 +76,10 @@ def create_app(cfg: StudioConfig | None = None) -> FastAPI:
     os.makedirs(proot, exist_ok=True)
     # Range/206 support is free via StaticFiles' FileResponse.
     app.mount("/media", RevalidatedStaticFiles(directory=proot), name="media")
+
+    # Trim per-project cache/backup bloat once at boot on a daemon thread, so the
+    # filesystem sweep never delays the server coming up (Studio.maintenance).
+    threading.Thread(target=sweep_projects, args=(cfg,), daemon=True).start()
 
     # The frontend is owned by a separate agent and may not exist yet; only mount
     # it when the directory is present so the API still boots on its own.

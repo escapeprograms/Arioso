@@ -43,10 +43,10 @@ FMAX     = None       # mel upper bound; None => SR / 2 (22050 Hz)
 # --- Vocoder checkpoint selection -----------------------------------------
 # Directory holding the active BigVGAN generator (config.json +
 # bigvgan_generator.pt). Points at the violin fine-tune (Arioso-mel adapted,
-# 2026-07-27, +2.5 dB MCD on Arioso-mel val) by default; set to None to use the
-# stock HF checkpoint (nvidia/bigvgan_v2_44khz_128band_512x). Overridable per
-# call via load_vocoder(checkpoint_dir=...). Missing dir fails loudly at load —
-# silently vocoding with the wrong checkpoint would just sound mysteriously
-# worse.
+# 20k steps 2026-07-28, +2.8 dB MCD on Arioso-mel val) by default; set to None
+# to use the stock HF checkpoint (nvidia/bigvgan_v2_44khz_128band_512x).
+# Overridable per call via load_vocoder(checkpoint_dir=...). Missing dir fails
+# loudly at load — silently vocoding with the wrong checkpoint would just sound
+# mysteriously worse.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VOCODER_DIR: str | None = os.path.join(_REPO_ROOT, "Vocoder", "models", "ft_v1")
+VOCODER_DIR: str | None = os.path.join(_REPO_ROOT, "Vocoder", "models", "ft_v2")

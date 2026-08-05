@@ -16,15 +16,15 @@ This module is torch-free.
 
 from __future__ import annotations
 
+import copy
 import os
+import shutil
 import threading
 import time
 
 from .config import SCHEMA_VERSION, StudioConfig
 from .library import (BACKUP_DIR, atomic_write_json, project_dir, project_file,
-                      read_json)
-
-_KEEP_BACKUPS = 20         # rolling rev backups retained per project
+                      read_json, render_cache_dir, unique_project_id)
 
 # Per-project write locks (module-level so all requests share them).
 _LOCKS: dict[str, threading.Lock] = {}
@@ -143,7 +143,8 @@ def _backup_dir(cfg: StudioConfig, project_id: str) -> str:
 def _roll_backup(cfg: StudioConfig, project_id: str, current: dict | None) -> None:
     """Copy the current project.json into project.backup/ before it is overwritten.
 
-    Writes a ``rev_*`` backup and prunes old ``rev_*`` files to the newest 20.
+    Writes a ``rev_*`` backup and prunes old ``rev_*`` files to the newest
+    ``cfg.retention.backups_keep``.
     """
     if current is None:
         return
@@ -153,7 +154,7 @@ def _roll_backup(cfg: StudioConfig, project_id: str, current: dict | None) -> No
     ts = time.strftime("%Y%m%d-%H%M%S")
     atomic_write_json(os.path.join(bdir, f"rev_{rev:05d}_{ts}.json"), current)
     revs = sorted(f for f in os.listdir(bdir) if f.startswith("rev_"))
-    for stale in revs[:-_KEEP_BACKUPS]:
+    for stale in revs[:-cfg.retention.backups_keep]:
         try:
             os.remove(os.path.join(bdir, stale))
         except OSError:
@@ -213,6 +214,56 @@ def commit_rebuild(cfg: StudioConfig, project_id: str, new_doc: dict,
         new_doc["schema_version"] = SCHEMA_VERSION
         new_doc["project_id"] = project_id
         return _write(cfg, project_id, new_doc)
+
+
+def set_name(cfg: StudioConfig, project_id: str, name: str) -> dict | None:
+    """Rename a project in place: roll a backup, set ``name``, bump rev, atomic write.
+
+    Returns the saved document, or ``None`` if the project does not exist (so the api
+    layer can shape a 404). The rename is a normal rev bump — the id never moves.
+    """
+    with lock_for(project_id):
+        current = load(cfg, project_id)
+        if current is None:
+            return None
+        _roll_backup(cfg, project_id, current)
+        doc = dict(current)
+        doc["name"] = str(name)
+        doc["rev"] = current.get("rev", 0) + 1
+        doc["schema_version"] = SCHEMA_VERSION
+        doc["project_id"] = project_id
+        return _write(cfg, project_id, doc)
+
+
+def duplicate(cfg: StudioConfig, src_id: str, name: str) -> dict | None:
+    """Deep-copy a project into a fresh id derived from ``name`` (rev -> 1).
+
+    The source segment-render cache (``render/cache/seg_*.wav``) is copied per-file,
+    best-effort (an in-flight render may be writing one), because segment hashes are
+    content-keyed rather than project-keyed — so the copy's first render is a
+    cache-hit stitch. The stitched ``mix.wav``/peaks/``meta.json``/``status.json``,
+    the ``project.backup/`` history and ``exports/`` are intentionally NOT copied.
+    Returns the new document, or ``None`` if the source is missing.
+    """
+    src = load(cfg, src_id)
+    if src is None:
+        return None
+    new_id = unique_project_id(cfg, name)
+    doc = copy.deepcopy(src)
+    doc["name"] = str(name)
+    saved = save_new(cfg, new_id, doc)      # rev -> 1, project_id -> new_id
+    src_cache = render_cache_dir(cfg, src_id)
+    if os.path.isdir(src_cache):
+        dst_cache = render_cache_dir(cfg, new_id)
+        os.makedirs(dst_cache, exist_ok=True)
+        for fname in os.listdir(src_cache):          # seg_<hash>.wav (see cache.seg_wav_name)
+            if fname.startswith("seg_") and fname.endswith(".wav"):
+                try:
+                    shutil.copy2(os.path.join(src_cache, fname),
+                                 os.path.join(dst_cache, fname))
+                except OSError:
+                    pass
+    return saved
 
 
 def summary(doc: dict) -> dict:

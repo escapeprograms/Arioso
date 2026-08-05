@@ -259,3 +259,34 @@ def test_prune_keeps_all_manifest_even_over_budget(tmp_path):
 
 def test_prune_missing_dir_is_noop(tmp_path):
     assert prune_cache(str(tmp_path / "nope"), [], max_files=5) == []
+
+
+def _write_sized(path, nbytes, mtime):
+    with open(path, "wb") as f:
+        f.write(b"\0" * nbytes)
+    os.utime(path, (mtime, mtime))
+
+
+def test_prune_max_mb_deletes_oldest_stale_first(tmp_path):
+    cache_dir = str(tmp_path)
+    # Four 100 KB stale WAVs, ascending mtime (s0 oldest ... s3 newest).
+    for i in range(4):
+        _write_sized(os.path.join(cache_dir, seg_wav_name(f"s{i}")),
+                     100_000, mtime=1_000_000.0 + i)
+    # max_files high (count pass is a no-op); 0.25 MB budget keeps the 2 newest.
+    deleted = prune_cache(cache_dir, [], max_files=64, max_mb=0.25)
+    assert set(deleted) == {seg_wav_name("s0"), seg_wav_name("s1")}   # oldest first
+    remaining = {f for f in os.listdir(cache_dir) if f.startswith("seg_")}
+    assert remaining == {seg_wav_name("s2"), seg_wav_name("s3")}
+
+
+def test_prune_max_mb_never_deletes_manifest_over_budget(tmp_path):
+    cache_dir = str(tmp_path)
+    keep = [f"k{i}" for i in range(3)]
+    # Three 100 KB manifest WAVs (300 KB) against a 50 KB budget: all must survive.
+    for i, h in enumerate(keep):
+        _write_sized(os.path.join(cache_dir, seg_wav_name(h)),
+                     100_000, mtime=1_000_000.0 + i)
+    deleted = prune_cache(cache_dir, keep, max_files=64, max_mb=0.05)
+    assert deleted == []
+    assert len(os.listdir(cache_dir)) == 3

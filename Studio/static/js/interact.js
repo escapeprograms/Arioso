@@ -9,8 +9,9 @@ import {
   selectOnly, setSelection, toggleSelection, clearSelection, pitchName, notify,
 } from './state.js';
 import {
-  xToBeat, beatToX, pitchToY, pitchRowAt, noteRect, rectFor,
+  xToBeat, beatToX, pitchToY, pitchRowAt, noteRect, rectFor, layout,
   visibleNotes, panByBeats, panByPitch, zoomAbout, clampView, ZOOM_STEP,
+  PITCH_LO, PITCH_HI,
 } from './timeline.js';
 import { snapBeat, defaultLen } from './snap.js';
 import * as edit from './editing.js';
@@ -84,6 +85,7 @@ function onWheel(e){
 function onDown(e){
   const grid = document.getElementById('grid');
   const { x, y } = xy(grid, e);
+  if (y < 0 || y >= layout.gridH || x < 0) return;
   const beat = xToBeat(x), pitch = pitchRowAt(y);
   const right = e.button === 2;
   grid.setPointerCapture(e.pointerId);
@@ -140,7 +142,7 @@ function onDown(e){
     // create a new note and immediately drag its end edge to set length
     const start = Math.max(0, snapBeat(beat));
     const len = defaultLen();
-    const note = edit.makeNote({ start_beat: start, len_beats: len, pitch: clamp(pitch, 0, 127), velocity: 100 });
+    const note = edit.makeNote({ start_beat: start, len_beats: len, pitch: clamp(pitch, PITCH_LO, PITCH_HI), velocity: 100 });
     apply(edit.createNotes([note]));
     startResize(note, 'end', e, { fresh: true });
     return;

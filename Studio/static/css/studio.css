@@ -257,6 +257,32 @@ input,select{ font:inherit; color:inherit; }
 .modal-check input{ accent-color:var(--accent); }
 .modal-foot{ display:flex; justify-content:flex-end; gap:8px; padding:10px 12px; border-top:1px solid var(--line2); }
 
+/* ---------------- Projects modal ---------------- */
+.projects-modal{ width:480px; max-width:92vw; }
+.proj-list{ display:flex; flex-direction:column; gap:4px; max-height:340px; overflow-y:auto; }
+.proj-empty{ color:var(--fg-mute); font-size:11px; text-align:center; padding:14px; }
+.proj-row{
+  display:flex; align-items:center; gap:8px; padding:6px 8px;
+  background:var(--bg3); border:1px solid var(--line2); border-radius:5px;
+}
+.proj-row.current{ border-color:var(--accent); background:color-mix(in srgb, var(--accent) 12%, var(--bg3)); }
+.proj-main{ flex:1 1 auto; min-width:0; }
+.proj-name{ color:var(--fg); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.proj-meta{ color:var(--fg-mute); font-size:10px; font-variant-numeric:tabular-nums; margin-top:2px; }
+.proj-rename{
+  width:100%; background:var(--bg2); border:1px solid var(--accent); border-radius:4px;
+  color:var(--fg); font-size:12px; padding:4px 6px; outline:none;
+}
+.proj-actions{ display:flex; gap:4px; flex:0 0 auto; }
+.proj-actions button{
+  background:var(--bg2); border:1px solid var(--line2); border-radius:4px;
+  color:var(--fg-dim); font-size:10px; padding:3px 8px; cursor:pointer;
+}
+.proj-actions button:hover:not(:disabled){ color:var(--fg); border-color:var(--accent); }
+.proj-actions button:disabled{ opacity:.45; cursor:default; }
+.proj-actions button.danger:hover:not(:disabled){ color:var(--err); border-color:var(--err); }
+.proj-actions .proj-cur{ color:var(--accent); border-color:var(--accent-dim); }
+
 /* ---------------- Status ---------------- */
 .statusbar{ background:var(--bg2); border-top:1px solid var(--line); padding:3px 10px; color:var(--fg-mute); font-size:11px; min-height:22px; display:flex; align-items:center; gap:10px; }
 #status-msg[data-kind=error]{ color:var(--err); }
