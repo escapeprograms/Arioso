@@ -76,6 +76,8 @@ compile:
   tempo: 120.0                       # MIDI tempo (bpm) for the in-memory prior score
   program: 40                        # MIDI program (40 = violin)
   mute_fade_ms: 5.0                  # cosine edge (ms) when zeroing mute regions
+  prior_pitch: quantized_vibrato     # prior pitch trajectory: quantized | quantized_vibrato
+                                     # (quantized + each note's measured vib_params) | bend
 
 # --- media stage (mel tiles, onset env, time-stretch) -------------------------
 media:

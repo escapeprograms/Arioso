@@ -7,6 +7,16 @@ const MIN_DUR = 0.02;
 
 function newHuman(){ return { technique: false, vibrato: false, velocity: false, timing: false }; }
 
+// --- vibrato params are onset-anchored (see common/vibrato_model.py) ---
+// vib_params describe cents-vs-seconds *since the note onset*, measured against the
+// note's scored pitch, and the depth/rate ramps extrapolate badly outside the span
+// they were fitted on. So any edit that moves a boundary or the pitch — or that
+// clears the vibrato flag the params belong to — drops them; the next vibrato-fit
+// pass re-measures. Every such command snapshots them first so undo restores them.
+function vibSnap(n){ return { p: n.vib_params, m: n.vib_model }; }
+function vibClear(n){ n.vib_params = null; n.vib_model = null; }
+function vibRestore(n, s){ n.vib_params = s.p; n.vib_model = s.m; }
+
 // --- generic field patch (dotted paths, e.g. 'human.technique') ---
 export function setFields(id, fields, opts = {}){
   const note = noteById(id);
@@ -24,9 +34,16 @@ export function setTechnique(id, techName, opts = {}){
   return setFields(id, { technique: techName, 'human.technique': true },
                    { label: 'technique', ...opts });
 }
+// Turning vibrato OFF also drops the fitted params (they described an oscillation the
+// label now says is not there); turning it ON leaves them alone — a note that is
+// re-flagged has none until the next fit pass.
+export function setVibrato(id, on){
+  const fields = { vibrato: !!on, 'human.vibrato': true };
+  if (!on) Object.assign(fields, { vib_params: null, vib_model: null });
+  return setFields(id, fields, { label: 'vibrato' });
+}
 export function toggleVibrato(id){
-  const n = noteById(id);
-  return setFields(id, { vibrato: !n.vibrato, 'human.vibrato': true }, { label: 'vibrato' });
+  return setVibrato(id, !noteById(id).vibrato);
 }
 export function setVelocity(id, vel){
   return setFields(id, { velocity: clamp(Math.round(vel), 1, 127), 'human.velocity': true },
@@ -37,11 +54,12 @@ export function setVelocity(id, vel){
 export function moveNote(id, dStart, dPitch, opts = {}){
   const n = noteById(id);
   const o = { start: n.start_s, end: n.end_s, pitch: n.pitch, timing: n.human.timing };
+  const vib = vibSnap(n);
   const newPitch = clamp(Math.round(o.pitch + dPitch), 0, 127);
   return {
     label: 'move', selAfter: id, phAfter: opts.phAfter,
-    mutate(){ const m = noteById(id); m.start_s = o.start + dStart; m.end_s = o.end + dStart; m.pitch = newPitch; m.human.timing = true; },
-    invert(){ const m = noteById(id); m.start_s = o.start; m.end_s = o.end; m.pitch = o.pitch; m.human.timing = o.timing; },
+    mutate(){ const m = noteById(id); m.start_s = o.start + dStart; m.end_s = o.end + dStart; m.pitch = newPitch; m.human.timing = true; vibClear(m); },
+    invert(){ const m = noteById(id); m.start_s = o.start; m.end_s = o.end; m.pitch = o.pitch; m.human.timing = o.timing; vibRestore(m, vib); },
   };
 }
 
@@ -49,11 +67,12 @@ export function moveNote(id, dStart, dPitch, opts = {}){
 export function resizeNote(id, dSec){
   const n = noteById(id);
   const o = { start: n.start_s, end: n.end_s, timing: n.human.timing };
+  const vib = vibSnap(n);
   const ne = Math.max(o.end + dSec, o.start + MIN_DUR);
   return {
     label: 'resize', selAfter: id,
-    mutate(){ const m = noteById(id); m.end_s = ne; m.human.timing = true; },
-    invert(){ const m = noteById(id); m.end_s = o.end; m.human.timing = o.timing; },
+    mutate(){ const m = noteById(id); m.end_s = ne; m.human.timing = true; vibClear(m); },
+    invert(){ const m = noteById(id); m.end_s = o.end; m.human.timing = o.timing; vibRestore(m, vib); },
   };
 }
 
@@ -87,17 +106,21 @@ export function splitNote(id, t){
   const n = noteById(id);
   if (!n || t <= n.start_s + MIN_DUR || t >= n.end_s - MIN_DUR) return null;
   const oldEnd = n.end_s, oldTiming = n.human.timing;
+  const vib = vibSnap(n);
   const rightId = allocId();
+  // The right half starts at t, so the left half's onset-anchored params describe
+  // neither piece: both sides come out unfitted.
   const right = {
     id: rightId, start_s: t, end_s: oldEnd, pitch: n.pitch, velocity: n.velocity,
     technique: n.technique, vibrato: n.vibrato, slur_group: n.slur_group,
+    vib_params: null, vib_model: null,
     auto: { ...(n.auto || {}) },
     human: { ...n.human, timing: true },
   };
   return {
     label: 'split', selAfter: id, phAfter: t,
-    mutate(doc){ const m = noteById(id); m.end_s = t; m.human.timing = true; doc.notes.push(right); },
-    invert(doc){ const m = noteById(id); m.end_s = oldEnd; m.human.timing = oldTiming;
+    mutate(doc){ const m = noteById(id); m.end_s = t; m.human.timing = true; vibClear(m); doc.notes.push(right); },
+    invert(doc){ const m = noteById(id); m.end_s = oldEnd; m.human.timing = oldTiming; vibRestore(m, vib);
                  const i = doc.notes.findIndex(x => x.id === rightId); if (i >= 0) doc.notes.splice(i, 1); },
   };
 }

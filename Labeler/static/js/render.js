@@ -205,7 +205,7 @@ function drawOneNote(g, n, selected){
   g.globalAlpha = 0.78; g.fillStyle = col;
   g.fillRect(r.x, r.y, r.w, r.h);
   g.globalAlpha = 1;
-  if (n.vibrato) drawVibrato(g, r, col);
+  if (n.vibrato) drawVibrato(g, r, col, n);
   const human = n.human && (n.human.technique || n.human.vibrato || n.human.velocity || n.human.timing);
   if (human){
     g.fillStyle = '#fff';
@@ -217,11 +217,27 @@ function drawOneNote(g, n, selected){
   }
 }
 
-function drawVibrato(g, r, col){
+// Which vib_params slot holds the depth / rate, per model (common/vibrato_model.py).
+// A model missing from this table draws the generic squiggle.
+const VIB_PARAM_IX = { rampboth5: { depth: 0, rate: 2 } };
+
+// Decorative squiggle above a vibrato note. With measured vib_params it is scaled:
+// spatial frequency from the fitted rate (converted through this note's px/s so the
+// wiggle count matches the real cycle count) and amplitude from the fitted half-depth.
+// Deliberately cheap — the initial-depth/rate snapshot only, no ramps, no phase.
+function drawVibrato(g, r, col, n){
+  const ix = n && n.vib_params && VIB_PARAM_IX[n.vib_model];
+  let k = 1 / 3, amp = 1.6;          // legacy fixed squiggle
+  if (ix){
+    const dur = Math.max(1e-3, n.end_s - n.start_s);
+    const pxPerSec = Math.max(1e-3, r.w / dur);
+    k = clamp(2 * Math.PI * n.vib_params[ix.rate] / pxPerSec, 0.05, 1.0);
+    amp = clamp(n.vib_params[ix.depth] / 9.4, 0.6, Math.max(1, r.h * 0.4));
+  }
   const y = r.y - 3, x0 = r.x, x1 = r.x + r.w;
   g.strokeStyle = col; g.lineWidth = 1.2; g.beginPath();
   for (let x = x0; x <= x1; x += 2){
-    const yy = y - Math.sin((x - x0) / 3) * 1.6;
+    const yy = y - Math.sin((x - x0) * k) * amp;
     if (x === x0) g.moveTo(x, yy); else g.lineTo(x, yy);
   }
   g.stroke();

@@ -26,7 +26,8 @@ from .config import CompileParams
 
 
 def notes_to_pretty_midi(notes: list[dict], tempo: float = 120.0,
-                         program: int = 40, with_env: bool = False) -> pretty_midi.PrettyMIDI:
+                         program: int = 40, with_env: bool = False,
+                         with_vibrato: bool = False) -> pretty_midi.PrettyMIDI:
     """Build a single-instrument pretty_midi score from note dicts.
 
     Each note needs ``start_s``, ``end_s``, ``pitch``; ``velocity`` defaults to 80.
@@ -39,9 +40,19 @@ def notes_to_pretty_midi(notes: list[dict], tempo: float = 120.0,
     when the note has none) that ``common.prior``'s render loop reads to bake per-note
     dynamics into the prior. Default ``False`` leaves the ``Note`` objects (and every
     disk-MIDI writer) byte-identical to the legacy ``velocity/127`` path.
+
+    When ``with_vibrato`` is set, a note that is flagged ``vibrato`` **and** carries
+    measured ``vib_params`` for the current ``common.vibrato_model.VIB_MODEL`` gets
+    ``vib_params``/``vib_model`` attributes that ``common.prior.QuantizedVibrato``
+    replays. A vibrato-flagged note with no (or stale-model) params gets nothing —
+    it renders flat rather than with an invented oscillation. Neither attribute
+    survives a ``.write()``; both are in-memory only.
     """
     # High tick resolution keeps note.start/end faithful through the write/read
     # round-trip so onset frames (np.round(start*SR/HOP)) stay bit-stable.
+    vib_model = None
+    if with_vibrato:
+        from common.vibrato_model import VIB_MODEL as vib_model  # lazy (scipy/librosa)
     pm = pretty_midi.PrettyMIDI(initial_tempo=float(tempo), resolution=480)
     inst = pretty_midi.Instrument(program=int(program), name="violin")
     for n in notes:
@@ -56,6 +67,10 @@ def notes_to_pretty_midi(notes: list[dict], tempo: float = 120.0,
         if with_env:
             env = n.get("env_dct")
             note_obj.env_dct = list(env) if env else velocity_to_env_dct(vel)
+        if (with_vibrato and n.get("vibrato") and n.get("vib_params")
+                and n.get("vib_model") == vib_model):
+            note_obj.vib_params = list(n["vib_params"])
+            note_obj.vib_model = vib_model
         inst.notes.append(note_obj)
     pm.instruments.append(inst)
     return pm

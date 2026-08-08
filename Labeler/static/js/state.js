@@ -171,6 +171,14 @@ export function noteEnvCoeffs(n){
     : [VEL_C0_A * n.velocity + VEL_C0_B, 0, 0];
 }
 
+// ---------- per-note vibrato params (render-only, for now) ----------
+// Notes flagged `vibrato` may also carry `vib_params` (fitted oscillator numbers) and
+// `vib_model` (the name of the model that reads them) once POST /vibrato-fit has run;
+// for the current `rampboth5` that is [D0, gD, f0, s, phi] — half-depth cents, cents/s,
+// Hz, Hz/s, radians, all anchored at the note ONSET (see common/vibrato_model.py).
+// They are onset-anchored, so editing.js clears them on any boundary/pitch edit.
+// render.js scales the vibrato squiggle from them; the preview synth ignores them.
+
 const NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 export function pitchName(m){
   m = Math.round(m);

@@ -306,6 +306,47 @@ def write_ft_config(
 
 
 # --------------------------------------------------------------------------- #
+# Model export
+# --------------------------------------------------------------------------- #
+def export_newest_snapshot(run_dir: str, name: Optional[str] = None) -> Optional[str]:
+    """Copy the newest ``g_`` snapshot + config into ``Vocoder/models/<name>/``.
+
+    The snapshot is copied as ``bigvgan_generator.pt`` — the filename
+    ``common.vocoder.load_vocoder`` prefers over step-prefixed snapshots — with the
+    trainer-written ``config.json`` alongside as the authoritative record of the
+    settings that produced it. ``name`` defaults to the run dir's basename.
+    Returns the export dir, or None if the run dir holds no snapshot.
+
+    Deliberately does NOT touch ``common.config.VOCODER_DIR``: promotion to the
+    active default stays a manual step, gated on an eval_ab listen.
+    """
+    run_dir = os.path.abspath(run_dir)
+    snaps = sorted(glob.glob(os.path.join(run_dir, "g_" + "?" * 8)))
+    if not snaps:
+        print("[WARN] No g_???????? snapshot in run dir; nothing to export.")
+        return None
+    snap = snaps[-1]
+
+    config_src = os.path.join(run_dir, "config.json")
+    if not os.path.isfile(config_src):
+        config_src = os.path.join(run_dir, "ft_config.json")
+
+    export_dir = os.path.join(_THIS_DIR, "models", name or os.path.basename(run_dir))
+    gen_dst = os.path.join(export_dir, "bigvgan_generator.pt")
+    if os.path.isfile(gen_dst):
+        print(f"[WARN] Overwriting existing export {gen_dst} (pass --export-name to keep it).")
+    os.makedirs(export_dir, exist_ok=True)
+    print(f"[INFO] Exporting {os.path.basename(snap)} -> {gen_dst}")
+    shutil.copyfile(snap, gen_dst)
+    shutil.copyfile(config_src, os.path.join(export_dir, "config.json"))
+    print(
+        "[INFO] Export complete. To make it the active default, point "
+        f"common/config.py::VOCODER_DIR at {export_dir} (after an eval_ab check)."
+    )
+    return export_dir
+
+
+# --------------------------------------------------------------------------- #
 # Smoke helpers
 # --------------------------------------------------------------------------- #
 def _write_first_n_lines(src: str, dst: str, n: int) -> None:
@@ -438,6 +479,18 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
+        "--export-name",
+        default=None,
+        help="name under Vocoder/models/ for the end-of-run export "
+        "(default: run dir basename); use when extending a run dir in place "
+        "so the previous export is not overwritten",
+    )
+    parser.add_argument(
+        "--no-export",
+        action="store_true",
+        help="skip the automatic end-of-run export to Vocoder/models/",
+    )
+    parser.add_argument(
         "--no-validation",
         action="store_true",
         help="pass --debug True to the trainer (skips ALL validation loops; "
@@ -560,6 +613,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         monitor.report()
 
     print(f"[INFO] Trainer exited with code {returncode}.")
+
+    # Auto-export the newest snapshot so the fine-tuned weights land in
+    # Vocoder/models/ (never on smoke or failed runs).
+    if returncode == 0 and not args.smoke and not args.no_export:
+        export_newest_snapshot(run_dir, args.export_name)
+
     return returncode
 
 

@@ -158,6 +158,17 @@ export async function envelopePass(id){
   mockRev += 1; mockDoc.rev = mockRev;
   return { status: 'ok', rev: mockRev, n_notes: mockDoc.notes.length };
 }
+export async function vibratoPass(id){
+  // Stamp fixed rampboth5 params [D0, gD, f0, s, phi] on vibrato notes, clear the rest.
+  let nFit = 0;
+  for (const n of mockDoc.notes){
+    if (n.vibrato){ n.vib_params = [10, 5, 5.5, 0.5, 0]; n.vib_model = 'rampboth5'; nFit++; }
+    else { n.vib_params = null; n.vib_model = null; }
+  }
+  mockRev += 1; mockDoc.rev = mockRev;
+  return { status: 'ok', rev: mockRev, model: 'rampboth5', n_notes: mockDoc.notes.length,
+           n_vibrato: nFit, n_fit: nFit, n_failed: 0, elapsed_s: 0.1 };
+}
 
 let compileJob = null;
 export async function startCompile(){ compileJob = { start: performance.now() }; return { status: 'accepted' }; }

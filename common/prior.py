@@ -203,6 +203,34 @@ class Quantized:
         return np.full(n, pretty_midi.note_number_to_hz(note.pitch), dtype=np.float64)
 
 
+class QuantizedVibrato:
+    """:class:`Quantized`, plus a measured per-note vibrato oscillation when present.
+
+    In-memory producers may attach ``note.vib_params`` (+ ``note.vib_model``, see
+    :mod:`common.vibrato_model`); the note's constant frequency is then multiplied by
+    the model's per-sample ratio ``2**(cents/1200)``. A note with no params — every
+    note of a disk-loaded MIDI, and every note the fit rejected — falls to the exact
+    :class:`Quantized` constant, so this mode is byte-identical to the baseline
+    wherever no vibrato was measured.
+
+    An unrecognized ``vib_model`` also falls back to the constant rather than raising:
+    a stale model name in one note of one clip must not abort a whole render. The
+    Labeler already refuses to attach params whose model does not match, so reaching
+    the fallback here means the on-disk data is ahead of (or behind) the code.
+    """
+    def __call__(self, inst, note, n, sr) -> np.ndarray:
+        hz = pretty_midi.note_number_to_hz(note.pitch)
+        params = getattr(note, "vib_params", None)
+        if not params:
+            return np.full(n, hz, dtype=np.float64)
+        from common.vibrato_model import (MODELS, VIB_MODEL,  # lazy: pulls scipy
+                                          vibrato_ratio)
+        model = getattr(note, "vib_model", None) or VIB_MODEL
+        if model not in MODELS:
+            return np.full(n, hz, dtype=np.float64)
+        return hz * vibrato_ratio(params, n, sr, model=model)
+
+
 class PitchBend:
     """Pitch-wheel-following frequency: ``note.pitch + bend(t)`` (vibrato/slides)."""
     def __init__(self, pb_range_semitones: float = PB_RANGE_SEMITONES):
@@ -446,19 +474,28 @@ def _make_harmonic_amps(law: str, *, alpha: float, corner_nc: float,
     raise ValueError(f"unknown harmonic_law {law!r} (expected 'alpha' or 'corner')")
 
 
-def _make_pitch(pitch: str) -> PitchTrajectory:
-    """Build the pitch trajectory: ``"quantized"`` (constant MIDI pitch) | ``"bend"``.
+_PITCH_MODES = ("quantized", "quantized_vibrato", "bend")
 
-    ``"bend"`` follows the per-instrument pitch-wheel (:class:`PitchBend`), baking
-    vibrato/slides/intonation into the prior; ``"quantized"`` (the baseline) ignores
-    bends. Kept as a factory seam so the Studio renderer can flip modes without
-    changing the quantized default that training/inference rely on.
+
+def _make_pitch(pitch: str) -> PitchTrajectory:
+    """Build the pitch trajectory: ``"quantized"`` | ``"quantized_vibrato"`` | ``"bend"``.
+
+    ``"quantized"`` (the baseline) holds each note at its constant MIDI frequency and
+    ignores bends. ``"quantized_vibrato"`` (:class:`QuantizedVibrato`) is that same
+    constant modulated by each note's *measured* ``vib_params`` when a producer
+    attached them in memory, and reduces exactly to ``"quantized"`` when none are
+    present. ``"bend"`` instead follows the per-instrument pitch-wheel
+    (:class:`PitchBend`), baking vibrato/slides/intonation from the MIDI itself into
+    the prior. Kept as a factory seam so the Studio renderer can flip modes without
+    changing the default that training/inference rely on.
     """
     if pitch == "quantized":
         return Quantized()
+    if pitch == "quantized_vibrato":
+        return QuantizedVibrato()
     if pitch == "bend":
         return PitchBend()
-    raise ValueError(f"unknown pitch {pitch!r} (expected 'quantized' or 'bend')")
+    raise ValueError(f"unknown pitch {pitch!r} (expected one of {list(_PITCH_MODES)})")
 
 
 def _make_source(source: str, *, harmonic_law: str, alpha: float, corner_nc: float,
@@ -491,9 +528,12 @@ def quantized_prior(*, source: str = PRIOR_SOURCE,
     """Assemble the quantized prior pipeline (the spec baseline) from the config knobs.
 
     ``pitch`` selects the pitch trajectory: ``"quantized"`` (constant MIDI pitch, the
-    default — keeps training/inference priors byte-identical) or ``"bend"``
-    (:class:`PitchBend`, following the per-instrument pitch-wheel so vibrato/slides are
-    baked into the prior; used by the Studio renderer's bend mode).
+    default — keeps training/inference priors byte-identical), ``"quantized_vibrato"``
+    (:class:`QuantizedVibrato` — the same constant plus each note's measured
+    ``vib_params`` when a producer attached them; identical to ``"quantized"`` for a
+    disk MIDI, and what the Labeler compile uses), or ``"bend"`` (:class:`PitchBend`,
+    following the per-instrument pitch-wheel so vibrato/slides are baked into the
+    prior; used by the Studio renderer's bend mode).
     """
     return PriorSynth(
         pitch=_make_pitch(pitch),

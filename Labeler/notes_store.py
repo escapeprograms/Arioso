@@ -56,8 +56,8 @@ def blank_human() -> dict:
 
 def build_note(ordinal: int, *, start_s: float, end_s: float, pitch: int,
                velocity: int, technique: str, vibrato: bool, auto: dict,
-               env_dct=None) -> dict:
-    return {
+               env_dct=None, vib_params=None, vib_model=None) -> dict:
+    note = {
         "id": note_id(ordinal),
         "start_s": round(float(start_s), 6),
         "end_s": round(float(end_s), 6),
@@ -69,6 +69,11 @@ def build_note(ordinal: int, *, start_s: float, end_s: float, pitch: int,
         # Per-note energy envelope (3 DCT coeffs) baked into the compile prior; None
         # until the envelope pass runs. Kept through build_document rebuilds.
         "env_dct": list(env_dct) if env_dct else None,
+        # Per-note vibrato oscillator params + the model that reads them (see
+        # common.vibrato_model). None until the vibrato-fit pass runs; only ever
+        # non-None on notes flagged ``vibrato``. ``vib_model`` is emitted only
+        # alongside params — a model name without params means nothing.
+        "vib_params": list(vib_params) if vib_params else None,
         "auto": {
             "velocity": int(auto.get("velocity", velocity)),
             "technique": str(auto.get("technique", technique)),
@@ -80,6 +85,9 @@ def build_note(ordinal: int, *, start_s: float, end_s: float, pitch: int,
         },
         "human": blank_human(),
     }
+    if note["vib_params"]:
+        note["vib_model"] = str(vib_model) if vib_model else None
+    return note
 
 
 def build_document(cfg: LabelerConfig, clip_id: str, notes: list[dict], *,
@@ -96,7 +104,8 @@ def build_document(cfg: LabelerConfig, clip_id: str, notes: list[dict], *,
         out_notes.append(build_note(
             i, start_s=n["start_s"], end_s=n["end_s"], pitch=n["pitch"],
             velocity=n["velocity"], technique=n["technique"], vibrato=n["vibrato"],
-            auto=n["auto"], env_dct=n.get("env_dct")))
+            auto=n["auto"], env_dct=n.get("env_dct"),
+            vib_params=n.get("vib_params"), vib_model=n.get("vib_model")))
     return {
         "schema_version": SCHEMA_VERSION,
         "clip_id": clip_id,
@@ -245,6 +254,52 @@ def set_envelopes(cfg: LabelerConfig, clip_id: str,
             env = env_by_id.get(nn.get("id"))
             if env is not None:
                 nn["env_dct"] = [round(float(x), 4) for x in env]
+            notes.append(nn)
+        doc["notes"] = notes
+        doc["rev"] = current.get("rev", 0) + 1
+        return _write(cfg, clip_id, doc)
+
+
+def set_vibrato_params(cfg: LabelerConfig, clip_id: str,
+                       params_by_id: dict[str, list[float] | None],
+                       model: str) -> dict | None:
+    """Merge per-note vibrato oscillator params onto a clip's notes, bumping ``rev``.
+
+    ``params_by_id`` maps note id -> the fitted params (see
+    :func:`common.vibrato_model.fit_note_vibrato`) or ``None``. The sibling of
+    :func:`set_envelopes`, with one deliberate contract difference:
+
+    * id **present with a list** -> that note's ``vib_params`` are set (rounded to 4
+      decimals) and ``vib_model`` is stamped with ``model``;
+    * id **present with ``None``** -> that note's ``vib_params``/``vib_model`` are
+      **cleared**. The fit pass sweeps every note in the document, so a note that
+      lost its vibrato flag (or whose fit failed) must lose stale params it can no
+      longer justify — silence there would leave the prior rendering a vibrato the
+      label says is not present;
+    * id **absent** -> that note is left untouched (a partial update stays partial).
+
+    Same lock / rolling-backup / rev-bump discipline as :func:`set_envelopes` so the
+    editor's next full-doc PUT sees the bumped rev and does not 409. Returns the
+    updated document (``None`` if the clip has no notes yet).
+    """
+    with lock_for(clip_id):
+        current = load(cfg, clip_id)
+        if current is None:
+            return None
+        _roll_backup(cfg, clip_id, current)
+        doc = dict(current)
+        notes = []
+        for n in doc.get("notes", []):
+            nn = dict(n)
+            nid = nn.get("id")
+            if nid in params_by_id:
+                params = params_by_id[nid]
+                if params is None:
+                    nn["vib_params"] = None
+                    nn["vib_model"] = None
+                else:
+                    nn["vib_params"] = [round(float(x), 4) for x in params]
+                    nn["vib_model"] = str(model)
             notes.append(nn)
         doc["notes"] = notes
         doc["rev"] = current.get("rev", 0) + 1

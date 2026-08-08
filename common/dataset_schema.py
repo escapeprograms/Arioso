@@ -108,6 +108,12 @@ class NoteEvent:
 
     ``articulation`` is a name in :data:`ARTICULATIONS` (validated at rasterization,
     unknown names are a hard error); ``vibrato`` is a played-with-vibrato flag.
+
+    ``env_dct`` (3 cosine coefficients, :mod:`common.envelope`) and ``vib_params`` /
+    ``vib_model`` (:mod:`common.vibrato_model`) are the measured per-note *shape*
+    descriptors baked into the rendered prior. Both are optional: the rasterizers and
+    conditioning encodings ignore them entirely, so a producer that has not measured
+    them emits identical cond tracks.
     """
     start_s: float
     end_s: float
@@ -116,6 +122,8 @@ class NoteEvent:
     articulation: str = "normal"
     vibrato: bool = False
     env_dct: tuple[float, ...] | None = None
+    vib_params: tuple[float, ...] | None = None
+    vib_model: str | None = None
 
 
 # --- the one rounding rule ------------------------------------------------------

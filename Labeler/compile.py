@@ -54,7 +54,7 @@ import numpy as np
 from common.audio_io import load_mono, voiced_rms_normalize, write_pcm16
 from common.config import HOP_SIZE, N_MELS, SR
 from common.dataset_schema import (ARTICULATIONS, DIR_GT, DIR_OFFSETS, DIR_ONSETS,
-                                   DIR_PRIOR_MEL, DIR_TARGET_MEL,
+                                   DIR_PRIOR_MEL, DIR_TARGET_MEL, DatasetRoot,
                                    MANIFEST_JSON, MANIFEST_SCHEMA_VERSION,
                                    NoteEvent, cond_dir, load_manifest,
                                    offset_frames, onset_frames, rasterize_articulation,
@@ -116,8 +116,9 @@ def notes_hash(notes: list[dict], mute_regions: list[dict]) -> str:
     """SHA-1 over a canonical dump of the fields that determine the compiled output.
 
     Canonical form: the notes list reduced to ``{start_s, end_s, pitch, velocity,
-    technique, vibrato, env_dct}`` (times rounded to 1e-6 s to match ``notes.json``'s own
-    rounding; env_dct coeffs to 1e-4) plus the mute regions reduced to ``{start_s, end_s}``,
+    technique, vibrato, env_dct, vib_params, vib_model}`` (times rounded to 1e-6 s to match
+    ``notes.json``'s own rounding; env_dct and vib_params coeffs to 1e-4) plus the mute
+    regions reduced to ``{start_s, end_s}``,
     serialized with
     ``sort_keys=True``. Any edit that changes what the compile emits changes this digest;
     cosmetic fields (``id``, ``auto`` block, ``human`` flags, ``slur_group``) do not.
@@ -132,6 +133,9 @@ def notes_hash(notes: list[dict], mute_regions: list[dict]) -> str:
                 "technique": str(n["technique"]),
                 "vibrato": bool(n.get("vibrato", False)),
                 "env_dct": [round(float(x), 4) for x in n["env_dct"]] if n.get("env_dct") else None,
+                "vib_params": ([round(float(x), 4) for x in n["vib_params"]]
+                               if n.get("vib_params") else None),
+                "vib_model": n.get("vib_model") or None,
             }
             for n in notes
         ],
@@ -255,7 +259,9 @@ def compile_one(cfg: LabelerConfig, clip_id: str, manifest: dict,
         NoteEvent(start_s=float(n["start_s"]), end_s=float(n["end_s"]),
                   pitch=int(n["pitch"]), velocity=int(n["velocity"]),
                   articulation=str(n["technique"]), vibrato=bool(n.get("vibrato", False)),
-                  env_dct=tuple(n["env_dct"]) if n.get("env_dct") else None)
+                  env_dct=tuple(n["env_dct"]) if n.get("env_dct") else None,
+                  vib_params=tuple(n["vib_params"]) if n.get("vib_params") else None,
+                  vib_model=n.get("vib_model") or None)
         for n in survivors
     ]
 
@@ -275,9 +281,11 @@ def compile_one(cfg: LabelerConfig, clip_id: str, manifest: dict,
     target_mel = mel_frames(y)
     n_frames = int(target_mel.shape[1])
 
-    # -- prior: surviving notes -> in-memory score (env_dct baked per note) -> mel --
-    pm = notes_to_pretty_midi(survivors, tempo=cp.tempo, program=cp.program, with_env=True)
-    prior_wav = quantized_prior().render(pm, total_samples=n_samples)
+    # -- prior: surviving notes -> in-memory score (env_dct + vib_params baked per
+    #    note) -> mel. Notes without measured params render exactly as before. --
+    pm = notes_to_pretty_midi(survivors, tempo=cp.tempo, program=cp.program,
+                              with_env=True, with_vibrato=True)
+    prior_wav = quantized_prior(pitch=cp.prior_pitch).render(pm, total_samples=n_samples)
     prior_mel = mel_frames(prior_wav)
     if prior_mel.shape[1] != n_frames:
         raise AssertionError(
@@ -311,6 +319,43 @@ def compile_one(cfg: LabelerConfig, clip_id: str, manifest: dict,
     return True
 
 
+# --- split reconciliation (post-compile) ----------------------------------------
+
+def update_root_split(root: str, verbose: bool = True) -> dict:
+    """Reconcile ``<root>/split.json`` with the just-written manifest; never raises.
+
+    Delegates to :func:`Arioso.splits.update_split` (additive: new clips assigned, vanished
+    ones pruned, existing train/val assignments never moved), so a compile can never again
+    leave freshly compiled clips in neither split — invisible to training. Returns that
+    call's summary dict, or ``{"error": ...}`` / ``{"skipped": ...}``: the compile artifacts
+    are already on disk by the time this runs, so a split failure must not fail the compile.
+
+    ``Arioso.splits`` is imported **inside** the function (the lazy-import idiom
+    ``common.prior`` uses for ``common.envelope``) so importing ``Labeler.compile`` — which
+    the server does at startup — never drags in the Arioso package.
+    """
+    if not os.path.isfile(os.path.join(root, MANIFEST_JSON)):
+        if verbose:
+            print("[compile] split   skipped (no manifest yet)")
+        return {"skipped": "no manifest"}
+    try:
+        from Arioso.splits import update_split          # lazy: keep module import light
+
+        # DatasetRoot straight from the schema (already imported here) — the lightest correct
+        # path to a root accessor; Arioso.clips.open_roots only adds a migration hint we do
+        # not need, since the manifest was written moments ago.
+        _, info = update_split(DatasetRoot(root))
+        if verbose:
+            print(f"[compile] split   +{info['added_train']} train, +{info['added_val']} val, "
+                  f"pruned {info['pruned']} "
+                  f"(val pieces {info['n_val_pieces']}/{info['n_pieces']})")
+        return info
+    except Exception as e:  # noqa: BLE001 - a split failure must not fail a finished compile
+        if verbose:
+            print(f"[compile] split   FAILED: {type(e).__name__}: {e}")
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 # --- whole-corpus compile -------------------------------------------------------
 
 def compile_all(cfg: LabelerConfig, clip_ids: list[str] | None = None,
@@ -321,6 +366,10 @@ def compile_all(cfg: LabelerConfig, clip_ids: list[str] | None = None,
     an explicit list compiles just those (each must be verified — else a listing error)
     and prunes nothing. ``progress(**fields)`` is called with rolling
     ``total/done/skipped/failed/current/root`` so a UI can poll live counts.
+
+    Every run (full or partial) ends by reconciling the root's ``split.json`` with the new
+    manifest via :func:`update_root_split`; its summary rides along under the returned
+    summary's ``"split"`` key. The progress/status schema is unchanged.
     """
     check_vocab(cfg)
     root = cfg.compile.root
@@ -379,6 +428,7 @@ def compile_all(cfg: LabelerConfig, clip_ids: list[str] | None = None,
 
     summary = {"total": total, "done": done, "skipped": skipped, "failed": failed,
                "root": root}
+    summary["split"] = update_root_split(root, verbose=verbose)
     if verbose:
         print(f"[compile] done: {done} built, {skipped} skipped, {failed} failed "
               f"-> {root}")

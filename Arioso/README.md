@@ -118,6 +118,22 @@ score .mid ─ common.prior.quantized_prior().render (additive saw, corner ladde
   computes/loads **one** root's `<root>/split.json` (an existing file is loaded verbatim, preserving
   a migrated root's exact split); `make_splits(roots, cfg)` merges an ordered root list into
   `{"train": [(root_idx, base), ...], "val": [...]}` (root order preserved).
+  - **Growing corpora.** `update_split(root, cfg) -> (split, summary)` reconciles an existing split
+    with the current manifest **additively**: prune basenames that left the manifest, keep every
+    surviving assignment on its current side (val stability across corpus growth), and assign the
+    new ones by whole piece — a new clip of an already-assigned piece follows that piece, genuinely
+    new pieces are sorted + seed-shuffled and sent to val only until the piece-level val target
+    `max(1, round(n_pieces * val_frac))` is met. No split file yet ⇒ plain `make_split`. The file
+    schema is unchanged (`train`/`val` sorted, `n_pieces`, `n_val_pieces`), so every consumer is
+    untouched; `summary` = `{created, added_train, added_val, pruned, n_pieces, n_val_pieces}`.
+  - **Stale-split warning.** Because the verbatim load is load-bearing, a split that no longer
+    covers its manifest would silently hide those clips from *both* train and val. `make_split`
+    now prints one `[splits] WARNING: ...` line naming the count when it loads such a split
+    (warning only — no behavior change). `missing_from_split(root, split)` is the check itself.
+  - CLI: `python -m Arioso.splits --data-root <root> [--update | --overwrite]` — `--update` is the
+    additive reconcile (prints `+N train, +N val, pruned N (val pieces K/N)`), `--overwrite`
+    recomputes from scratch (reshuffles the held-out pieces). The Labeler's compile calls
+    `update_split` at the end of every run, so a compiled root's split always covers its manifest.
 - **dataset.py** — `AriosoDataset` (mmap mel slices), `LengthBucketBatchSampler`, `collate`
   (frame masks), `build_dataloader`.
   - **Multi-root + conditioning flow.** `AriosoDataset(roots, clips, specs=())` — a clip's `root`

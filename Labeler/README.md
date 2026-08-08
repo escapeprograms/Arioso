@@ -19,7 +19,7 @@ PY="C:/Users/archi/Miniconda3/envs/ai-violin/python.exe"
 "$PY" -m Labeler.server                     # http://127.0.0.1:8765  (/ redirects to /static/)
 "$PY" -m Labeler.processing <wav-or-clip-id> [--force-from STAGE] [--notes-mode MODE]   # headless
 "$PY" -m Labeler.compile [--all | <clip_id> ...] [--config PATH] [--force]              # compile verified clips
-"$PY" -m pytest Labeler/tests -q            # 22 tests, no GPU/network
+"$PY" -m pytest Labeler/tests -q            # 55 tests, no GPU/network
 ```
 
 Pipeline (per clip, cached per stage by params-hash):
@@ -53,9 +53,28 @@ Installed into **ai-violin** on top of the training stack: `torchaudio==2.6.0+cu
 ## notes.json schema (v1) + label preservation
 
 Per note `{id "nNNNN" (monotonic via next_note_ordinal), start_s, end_s, pitch, velocity,
-technique: str, vibrato: bool, slur_group: null (reserved), auto: {velocity, technique,
+technique: str, vibrato: bool, slur_group: null (reserved), env_dct, vib_params, vib_model,
+auto: {velocity, technique,
 vibrato, amplitude, onset_strength, vibrato_rate_hz, vibrato_extent_cents},
-human: {technique, vibrato, velocity, timing}}`. Clip level: audio/denoise + pipeline param
+human: {technique, vibrato, velocity, timing}}`.
+
+The last three are **measured shape descriptors baked into the compile prior**, `null`
+until their measurement pass runs, and are labels-derived data rather than labels:
+- `env_dct: [c0, c1, c2] | null` — the note's energy envelope (`common/envelope.py`;
+  level/tilt/arch in power-dB), written by `POST .../envelope`.
+- `vib_params: [float] | null` + `vib_model: str | null` — the note's fitted vibrato
+  oscillator (`common/vibrato_model.py`; for the current `rampboth5`,
+  `[D0, gD, f0, s, phi]` = half-depth cents, cents/s, Hz, Hz/s, radians), written by
+  `POST .../vibrato-fit`. Only ever set on notes with `vibrato: true`; `vib_model` is
+  emitted only alongside params. **Onset-anchored**, so the front-end clears both on
+  any boundary/pitch edit or when the vibrato flag is cleared — a fresh pass re-measures.
+  For a human-readable vibrato rate read `auto.vibrato_rate_hz`, **not** `vib_params[2]`:
+  the fitted rate is a curve-fit parameter (r = 0.089 vs the detector; pinned at a bound
+  on ~30% of notes). Model tiering if it is ever swapped: `rampboth5` (5 params, median
+  4.29 cents), `dramp4` (4, 4.95, better-behaved rate), `lfo3` (3, 5.57), against a 7.72
+  no-model floor.
+
+Clip level: audio/denoise + pipeline param
 blocks (with hashes), vocabulary snapshot, `mute_regions [{start_s, end_s, label}]`,
 `orphaned_labels`, `view {px_per_sec, scroll_s, gt_variant}` (snake_case), `rev`, and the
 top-level **`verified: false`** sign-off flag (missing → `False`; additive, no schema bump —
@@ -78,6 +97,15 @@ locking (409 on stale).
 offset_applied_s, `mel.mel_bin_of_midi[128]`, `media` URL map incl. per-tile widths) ·
 `GET|PUT .../notes` (+POST alias for sendBeacon; 409 rev_conflict/job_running) ·
 `POST .../verified {verified}` (rev-bumping sign-off; 409 job_running) ·
+`POST .../envelope` → `{status, rev, n_notes}` (fit every note's `env_dct` from
+`cleaned.wav` + the CURRENT boundaries; rev-bumping; 409 job_running / 404
+not_processed) ·
+`POST .../vibrato-fit` → `{status, rev, model, n_notes, n_vibrato, n_fit, n_failed,
+elapsed_s}` (one whole-clip pyin pass, then fit every `vibrato: true` note and
+**clear** every other note's params; same guards. `n_failed` = vibrato notes the fitter
+rejected as unfittable. **Slow — ~3.5× the clip duration** (a 24 s clip measured 84 s);
+it is a synchronous request with no server-side timeout, so clients must not impose a
+short one) ·
 `POST /api/compile` + `GET /api/compile/status` (background compile of verified clips;
 409 compile_running) · `/media/<clip>/…` StaticFiles (wav
 Range/206). `/` **redirects to `/static/`** — index.html uses relative `./js` refs that
@@ -106,7 +134,11 @@ at playhead, `g` mute-region paint on ruler. Wheel pans time; ctrl+wheel zooms (
 - **`config.py`** — `LabelerConfig` dataclass tree + YAML loader (`load_config`; unknown key
   = hard error listing valid keys, mirroring `Arioso/run_config.py`). Owns `STAGES`,
   `SCHEMA_VERSION`, `MODEL_FPS` (44100/256), `stage_params_hash` (drives the skip cache).
-  Re-exports `SR`/`HOP` from `common.config`.
+  Re-exports `SR`/`HOP` from `common.config`. `CompileParams` = `{root, gt_variant, tempo,
+  program, mute_fade_ms, prior_pitch}`; `prior_pitch` (default `quantized_vibrato`) is the
+  `common.prior` pitch trajectory the compile prior renders through. `_STAGE_PARAMS["compile"]`
+  hashes the whole dataclass, so touching any of the six changes `compile_hash` and forces a
+  full recompile.
 - **`library.py`** — filesystem layout (`clip_dir`, `raw_dir`, `exports_dir`, filename
   constants), `sanitize_clip_id`, `scan_clips`/`get_clip_info` (state raw/processing/
   ready/error, duration via `soundfile.info`), `ClipNotFound`, atomic `read_json`/
@@ -148,13 +180,27 @@ at playhead, `g` mute-region paint on ruler. Wheel pans time; ctrl+wheel zooms (
   tunable in `labeler.yaml`; conservative on fast passages by design.
 - **`notes_store.py`** — schema v1 builders (`build_document`/`build_note`), per-clip
   locks, `put_with_rev` (409 stale), rolling + named-snapshot backups,
-  `merge_retranscribe`, `commit_rebuild`/`save_new`.
+  `merge_retranscribe`, `commit_rebuild`/`save_new`. Two measurement-pass writers with the
+  same lock / `_roll_backup` / rev-bump discipline (so the editor's next full-doc PUT does
+  not 409): `set_envelopes(cfg, clip_id, env_by_id)` and
+  `set_vibrato_params(cfg, clip_id, params_by_id, model)`. They differ deliberately on the
+  `None` case — `set_envelopes` ignores it, while for `set_vibrato_params` an id present
+  with `None` **clears** that note's `vib_params`/`vib_model` (the fit pass sweeps every
+  note, so a note that lost its vibrato flag must lose params it can no longer justify).
+  In both, an **absent** id leaves that note untouched.
 - **`midi_io.py`** — `notes_to_pretty_midi`/`write_midi`: tempo 120, single Instrument
   program 40 ("violin"), int velocities, **no pitch bends**, resolution 480 (so
   `note_groups_from_midi` onset frames survive the write/read round-trip);
   `validate_for_export` (zero/neg duration = error, same-pitch overlap = warning).
   This is the repo's only MIDI **writer**; consumers (`common.prior` `render`/`note_onsets`,
   `common.dataset_schema.note_groups_from_midi`) read it identically to the etude MIDIs.
+  Two opt-in flags attach **in-memory-only** per-note attributes the prior render loop
+  reads (neither survives `.write()`, so disk MIDIs stay byte-identical): `with_env=True`
+  → `note.env_dct` (measured, else the velocity-derived flat env) and `with_vibrato=True`
+  → `note.vib_params`/`note.vib_model`, attached **only** when the note is flagged
+  `vibrato`, carries params, and its `vib_model` matches the current
+  `common.vibrato_model.VIB_MODEL` (imported lazily inside the call). No fallback for an
+  unfitted vibrato note — it renders flat.
 - **`media.py`** — viewer derivatives (matplotlib Agg, lazy torch): `mel_tiles`
   (`common.vocoder.mel_spectrogram` → p1–p99 → magma PNGs + `meta.json` incl.
   `mel_bin_of_midi[128]` from `librosa.mel_frequencies` interpolation), `write_onset_env`,
@@ -166,21 +212,44 @@ at playhead, `g` mute-region paint on ruler. Wheel pans time; ctrl+wheel zooms (
   Per **verified** clip: validate every note articulation ∈ `common.dataset_schema.ARTICULATIONS`,
   drop notes whose midpoint is inside a mute region, cosine-zero mutes (5 ms) + voiced-RMS
   normalize the chosen wav → `gt/`, mel → `target_mel/`, prior (surviving notes →
-  `notes_to_pretty_midi` → `common.prior.quantized_prior().render`) → `prior_mel/`, `onsets/`
-  + `cond/{articulation,velocity,vibrato}/` via the schema rasterizers. Incremental/idempotent
+  `notes_to_pretty_midi(with_env=True, with_vibrato=True)` →
+  `common.prior.quantized_prior(pitch=cp.prior_pitch).render`, so each note's measured
+  envelope **and** vibrato are baked in) → `prior_mel/`, `onsets/` + `offsets/`
+  + `cond/{articulation,vibrato}/` via the schema rasterizers (the rasterizers see
+  only the `vibrato` bool — `vib_params` affects the prior audio, never the cond tracks;
+  per-note dynamics ride in the prior via `env_dct`, so there is no velocity cond track).
+  Incremental/idempotent
   on a `{rev, notes_hash, compile_hash}` provenance triple; a full `--all` run prunes clips no
   longer verified (manifest + artifacts). `CompileManager` runs it on a background thread for
   the API. `notes_hash` = sha1 over a canonical dump of the notes (`start_s/end_s/pitch/velocity/
-  technique/vibrato`, times rounded 1e-6) + mute regions (`start_s/end_s`).
+  technique/vibrato/env_dct/vib_params/vib_model`, times rounded 1e-6 and coefficients 1e-4)
+  + mute regions (`start_s/end_s`) — so re-running either measurement pass invalidates the
+  affected clips and nothing else.
+  - **Auto split update.** Every run (full or partial) ends in `update_root_split(root)` →
+    `Arioso.splits.update_split`, which additively reconciles `<root>/split.json` with the new
+    manifest (new clips assigned by piece, vanished ones pruned, existing train/val assignments
+    never moved), prints one `[compile] split +N train, +N val, pruned N (val pieces K/N)` line
+    and returns its summary under the run summary's `"split"` key. Without it a clip compiled
+    after the split was written sits in neither list and is invisible to training. It is wrapped
+    in a try/except (the artifacts are already on disk — a split failure must not fail the
+    compile) and imports `Arioso.splits` **lazily inside the function**, so `Labeler.server`'s
+    startup import graph never reaches into `Arioso`. The progress/status schema is unchanged.
 - **`server.py`** — `create_app`: cfg + JobManager + CompileManager on `app.state`; mounts `/api`,
   `/media` (Range for free), `/static` (html=True); `/` → RedirectResponse(`/static/`);
   Windows `.js/.mjs/.css` MIME fix at startup. `main`: uvicorn 127.0.0.1:8765, single
   process, **no reload** (MUSC singleton).
 - **`api.py`** — thin routes onto library/processing/notes_store/compile; documented error
-  codes; reads cfg/jobs/compiler from `request.app.state`.
-- **`tests/`** — 25 pytest cases, GPU/network-free: velocity mapping, vibrato synthetic FM
+  codes; reads cfg/jobs/compiler from `request.app.state`. The two measurement passes
+  (`compute_envelopes`, `fit_vibrato`) are plain sync handlers sharing one guard set
+  (404 clip_not_found / no_notes / not_processed, 409 job_running) — they run in the request
+  thread rather than through `JobManager` because they are read-then-write-notes, not
+  pipeline stages.
+- **`tests/`** — 55 pytest cases, GPU/network-free: velocity mapping, vibrato synthetic FM
   (true/flat/drift/short), notes_store rev-conflict + merge semantics, MIDI round-trip
-  through `note_groups_from_midi`, align sign convention on synthetic click tracks, and
+  through `note_groups_from_midi`, align sign convention on synthetic click tracks,
+  `test_vibrato_fit` (synthetic rampboth5 round-trip incl. NaN/octave-spike robustness and
+  baseline-absorption, the three rejection paths, `vibrato_ratio`/unknown-model contracts,
+  `set_vibrato_params` set/clear/absent + backup, and `notes_hash` sensitivity), and
   `test_transcribe_decode` — `decode_posteriors` on a synthetic 60 ms + 200 ms posterior
   grid: both survive `min_note_len_ms` 45, only the long one survives 127.7, onset order +
   frame→second mapping exact (no torch/model needed, `spotify_create_notes` is numpy/scipy).
@@ -189,6 +258,8 @@ at playhead, `g` mute-region paint on ruler. Wheel pans time; ctrl+wheel zooms (
 
 - **`index.html` / `css/app.css`** — DOM skeleton (transport, sidebar, roll grid, velocity/
   onset lanes, minimap, region popover, orphan panel, rev-conflict modal) + dark theme.
+  Header holds the three clip-level action buttons, all hidden until a doc is loaded:
+  `#btn-envelope` (♫ Envelopes), `#btn-vibrato` (∯ Vibrato) and `#btn-verified`.
 - **`js/state.js`** — single store + command-pattern undo/redo (cap 500; captures
   selection+playhead so undoing a label-key press steps back), sorted-notes cache
   (`invalidateSorted` MUST be called after any direct `store.doc` assignment — the load
@@ -196,11 +267,17 @@ at playhead, `g` mute-region paint on ruler. Wheel pans time; ctrl+wheel zooms (
 - **`js/timeline.js`** — geometry only: time↔px, bin↔y (origin lower), `binForPitch` via
   server `mel_bin_of_midi`, note/velocity rects, pan/zoom clamp, binary-search culling
   (`visibleNotes`).
-- **`js/api.js`** — one function per endpoint; `?mock=1` diverts to `mock.js`; resolves
-  `meta.media` URLs; decodes audio + onset env; `beaconNotes` for `beforeunload`.
+- **`js/api.js`** — one function per endpoint (incl. `envelopePass`/`vibratoPass`);
+  `?mock=1` diverts to `mock.js`; resolves
+  `meta.media` URLs; decodes audio + onset env; `beaconNotes` for `beforeunload`. `j()` is a
+  plain `fetch` with **no client timeout** — required, since `vibratoPass` can run minutes.
 - **`js/render.js`** — all drawing, DPR-correct: mel tiles (source-crop, LRU 30), open-string
   gridlines, mute hatching, notes (technique color, vibrato squiggle, human tick, selection),
-  velocity/onset lanes, minimap, rAF-only overlay (playhead/hover/ghosts).
+  velocity/onset lanes, minimap, rAF-only overlay (playhead/hover/ghosts). The vibrato
+  squiggle is **scaled from `vib_params`** when present (`VIB_PARAM_IX` maps model → depth/rate
+  slots; spatial frequency converted through the note's px/s so the wiggle count matches the
+  real cycle count, amplitude from the half-depth clamped to the note band) — decorative
+  only, no ramps or phase; notes without params keep the legacy fixed squiggle.
 - **`js/interact.js`** — wheel pan / ctrl+wheel zoom; select/scrub; drags: move+re-pitch
   (semitone snap), edge resize (5 px zones), velocity bars, ruler region-paint, dbl-click
   create, minimap jump. Every mutation is an undoable command.
@@ -211,13 +288,21 @@ at playhead, `g` mute-region paint on ruler. Wheel pans time; ctrl+wheel zooms (
   scheduler; voice = triangle + saw(−8 dB) → lowpass(4·f0 ≤ 12 kHz) → 8 ms attack /
   60 ms exp release, peak `0.25·(vel/127)^1.5`, pool 8; speed/variant change pauses first.
 - **`js/editing.js`** — command factories with exact inverses (fields/technique/vibrato/
-  velocity, move/resize/add/delete/split, mute-region add/delete).
+  velocity, move/resize/add/delete/split, mute-region add/delete). Because `vib_params` are
+  onset-anchored, `setVibrato(id, false)`, `moveNote`, `resizeNote` and `splitNote` all
+  **clear** `vib_params`/`vib_model` (snapshotting them first, so undo restores them); the
+  split's right half is created without params.
 - **`js/main.js`** — bootstrap + orchestration: config/clips load, clip loading
   (meta → notes → onset; `invalidateSorted` after doc assignment), keymap actions, rAF
   loop + follow-playhead, autosave (1.5 s debounce, retry backoff, sendBeacon), rev-conflict
-  modal, 500 ms processing poll, sidebar/inspector/transport wiring.
-- **`js/mock.js`** — dev backend (`?mock=1`) mirroring the real API shapes + the
-  `?selftest=1` in-page test routine (result in `document.title`).
+  modal, 500 ms processing poll, sidebar/inspector/transport wiring. `runServerPass(btnId,
+  apiFn, {idle, busy, done})` is the shared driver behind both measurement buttons —
+  disable → POST → re-GET the doc (the server bumped `rev`, so a stale full-doc PUT would
+  409) → `invalidateSorted`/`initIdCounter`/`clearHistory` → repaint → flash the result on
+  the label, with 409 `job_running` flashed rather than raised.
+- **`js/mock.js`** — dev backend (`?mock=1`) mirroring the real API shapes (incl.
+  `envelopePass` and `vibratoPass`, which stamps fixed `rampboth5` params on vibrato notes
+  and nulls the rest) + the `?selftest=1` in-page test routine (result in `document.title`).
 
 ## Windows gotchas
 

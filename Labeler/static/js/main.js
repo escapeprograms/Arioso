@@ -228,44 +228,69 @@ function wireTransport(){
 
   $('insp-vel').onchange = (e) => { if (store.selectedId) apply(edit.setVelocity(store.selectedId, parseInt(e.target.value, 10))); };
   $('insp-tech').onchange = (e) => { if (store.selectedId) apply(edit.setTechnique(store.selectedId, e.target.value)); };
-  $('insp-vib').onchange = (e) => { if (store.selectedId) apply(edit.setFields(store.selectedId, { vibrato: e.target.checked, 'human.vibrato': true }, { label: 'vibrato' })); };
+  $('insp-vib').onchange = (e) => { if (store.selectedId) apply(edit.setVibrato(store.selectedId, e.target.checked)); };
   $('region-pop-close').onclick = () => { store.paintMode = false; $('region-popover').hidden = true; };
   $('btn-verified').onclick = () => toggleVerified();
   $('btn-envelope').onclick = () => runEnvelopePass();
+  $('btn-vibrato').onclick = () => runVibratoPass();
 }
 
-// ---------------- envelope pass ----------------
-async function runEnvelopePass(){
+// ---------------- server measurement passes (envelope / vibrato) ----------------
+// Both buttons run the same sequence: disable -> POST -> re-GET the doc (the server
+// bumped rev server-side, so the next full-doc PUT would 409 against our stale copy)
+// -> reset the local edit history -> repaint -> flash a result on the label. The
+// vibrato pass runs whole-clip pyin at ~3.5x the clip duration (a 24 s clip took 84 s),
+// so it is minutes on a long clip; api.j() is a plain fetch with no client timeout, so
+// nothing here needs (or may add) a deadline.
+const _flashTimers = new Map();
+function flashBtn(btnId, idle, msg, ms = 2000){
+  const lbl = $(btnId).querySelector('.lbl');
+  lbl.textContent = msg;
+  clearTimeout(_flashTimers.get(btnId));
+  _flashTimers.set(btnId, setTimeout(() => { lbl.textContent = idle; }, ms));
+}
+
+async function runServerPass(btnId, apiFn, labels){
   if (!store.doc || store.clipId == null) return;
-  const b = $('btn-envelope');
+  const b = $(btnId), lbl = b.querySelector('.lbl');
   b.disabled = true;
+  clearTimeout(_flashTimers.get(btnId));
+  lbl.textContent = labels.busy;
   try {
-    const res = await api.envelopePass(store.clipId);
-    // The server bumped rev and wrote env_dct; pull the fresh doc so the next full-doc
-    // PUT does not 409, then flash the note count on the button label.
+    const res = await apiFn(store.clipId);
     store.doc = await api.getNotes(store.clipId);
     invalidateSorted();
     initIdCounter(store.doc); clearHistory();
     store.save.state = 'saved';
     requestStatic(); onStoreChange();
-    flashEnvelope(b, `${res.n_notes} notes ✓`);
+    flashBtn(btnId, labels.idle, labels.done(res));
   } catch (err) {
-    if (err instanceof api.ApiError && err.status === 409){ flashEnvelope(b, 'job running'); }
-    else recordError('envelope: ' + err);
+    lbl.textContent = labels.idle;
+    if (err instanceof api.ApiError && err.status === 409){ flashBtn(btnId, labels.idle, 'job running'); }
+    else recordError(labels.idle.toLowerCase() + ': ' + err);
   } finally {
     b.disabled = false;
   }
 }
-let _envFlashTimer = null;
-function flashEnvelope(b, msg){
-  const lbl = b.querySelector('.lbl');
-  lbl.textContent = msg;
-  clearTimeout(_envFlashTimer);
-  _envFlashTimer = setTimeout(() => { lbl.textContent = 'Envelopes'; }, 2000);
+
+function runEnvelopePass(){
+  return runServerPass('btn-envelope', api.envelopePass, {
+    idle: 'Envelopes', busy: 'fitting…',
+    done: (r) => `${r.n_notes} notes ✓`,
+  });
+}
+function runVibratoPass(){
+  return runServerPass('btn-vibrato', api.vibratoPass, {
+    idle: 'Vibrato', busy: 'fitting…',
+    done: (r) => `${r.n_fit}/${r.n_vibrato} fit ✓`,
+  });
 }
 
 function syncEnvelopeBtn(){
   $('btn-envelope').hidden = !store.doc;
+}
+function syncVibratoBtn(){
+  $('btn-vibrato').hidden = !store.doc;
 }
 
 // ---------------- verified flag ----------------
@@ -426,6 +451,7 @@ function onStoreChange(){
   syncTransport();
   syncVerifiedBtn();
   syncEnvelopeBtn();
+  syncVibratoBtn();
   if (store.paintMode) renderRegionList();   // keep the mute-region popover in sync
 }
 

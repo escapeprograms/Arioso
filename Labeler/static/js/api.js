@@ -31,6 +31,10 @@ export const putNotes   = (id, doc)        => MOCK ? mock.putNotes(id, doc)    :
 export const processClip= (id, opts = {})  => MOCK ? mock.processClip(id, opts): j('POST', `/api/clips/${id}/process`, opts);
 export const setVerified= (id, verified)   => MOCK ? mock.setVerified(id, verified) : j('POST', `/api/clips/${id}/verified`, { verified });
 export const envelopePass= (id)             => MOCK ? mock.envelopePass(id)     : j('POST', `/api/clips/${id}/envelope`, {});
+// Slow: whole-clip pyin runs at ~3.5x the clip duration (a 24 s clip took 84 s), so a
+// long clip is a MINUTES-long request. j() is a plain fetch with no client timeout —
+// keep it that way.
+export const vibratoPass= (id)             => MOCK ? mock.vibratoPass(id)      : j('POST', `/api/clips/${id}/vibrato-fit`, {});
 export const startCompile= ()              => MOCK ? mock.startCompile()        : j('POST', '/api/compile', {});
 export const compileStatus= ()             => MOCK ? mock.compileStatus()       : j('GET', '/api/compile/status');
 

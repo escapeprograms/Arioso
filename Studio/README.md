@@ -219,6 +219,10 @@ render thread would race those saves and bump the rev. Meta is a separate server
   Both `phrase` and `selection` scope render exactly the non-cached segments (content hashing
   makes an edited note's segment miss automatically, so the mix is always complete); scope
   only affects the reported `segments_touched` count. Empty project → a short silence.
+  Note: `common.dataset_schema.NoteEvent` gained optional `vib_params`/`vib_model` fields
+  (Labeler's measured per-note vibrato, `common/vibrato_model.py`) — Studio is **unaffected**.
+  It builds its `NoteEvent`s without them, and its `PRIOR_MODES` are only `bend`/`quantized`,
+  never the new `quantized_vibrato`; Studio expresses vibrato through its own bend curves.
 - **`cache.py`** — segment cache logic (numpy + soundfile, **torch-free**).
   `segment_notes(notes, bpm, gap_s, pad_s)`: maximal runs split on silence gaps `>= gap_s`,
   each padded into the adjacent silence (internal boundaries split the gap in half so pads

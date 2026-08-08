@@ -131,14 +131,18 @@ class CompileParams:
     onsets/cond) is written; ``gt_variant`` chooses which processed wav becomes the GT
     (``cleaned`` denoised or the ``source`` ingest). ``tempo``/``program`` shape the
     in-memory pretty_midi the prior is rendered from (violin = program 40); ``mute_fade_ms``
-    is the cosine edge used when zeroing mute regions in the GT wav. All five participate
-    in the ``compile`` params-hash, so changing any forces a recompile.
+    is the cosine edge used when zeroing mute regions in the GT wav. ``prior_pitch`` is
+    the ``common.prior`` pitch trajectory: ``quantized_vibrato`` (default) replays each
+    note's measured ``vib_params`` and reduces to plain ``quantized`` for notes that have
+    none. All six participate in the ``compile`` params-hash (``_STAGE_PARAMS["compile"]``
+    hashes this whole dataclass), so changing any forces a recompile of every clip.
     """
     root: str = "Data/datasets/gt_arky"
     gt_variant: str = "cleaned"
     tempo: float = 120.0
     program: int = 40
     mute_fade_ms: float = 5.0
+    prior_pitch: str = "quantized_vibrato"
 
 
 @dataclass(frozen=True)

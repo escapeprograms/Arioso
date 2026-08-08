@@ -174,7 +174,12 @@ imports it without a GPU stack.
   maps (Arioso's `CondSpec` registry reads these — the literals live once, here).
   `REST_SNAP_FRAMES = 10` — the legato/rest-gap threshold.
 - `NoteEvent` — frozen dataclass `{start_s, end_s, pitch, velocity, articulation,
-  vibrato}`: the canonical per-note record every producer rasterizes from.
+  vibrato, env_dct, vib_params, vib_model}`: the canonical per-note record every
+  producer rasterizes from. The last three default to `None` and are *measured shape*
+  descriptors baked into the rendered prior (`env_dct` → `envelope.py`,
+  `vib_params`/`vib_model` → `vibrato_model.py`); **no rasterizer or conditioning
+  encoding reads them**, so a producer that has not measured them emits identical
+  `cond/` tracks. Only `Labeler.compile` fills them today.
 - `frame_of(t_s)` — **THE** rounding rule `round(t_s*SR/HOP_SIZE)` (matches
   `build_prior`'s `np.round`); keeping it in one place is what makes the
   onset≡group-onset identity hold.
@@ -207,9 +212,23 @@ body (`Identity`, the no-EQ seam), and leveler (`MaskedRMS` | `Peak`). The
 `PRIOR_*` / `FADE_MS` knobs live **here** now (the single source of truth for the
 prior shape).
 - `quantized_prior(...)` — factory assembling the spec-baseline pipeline from the
-  `PRIOR_*` knobs (additive rounded-corner saw + masked-RMS to `TARGET_RMS_DBFS`);
-  `pitch="quantized"` (default; byte-identical train/inference prior) or `"bend"`
+  `PRIOR_*` knobs (additive rounded-corner saw + masked-RMS to `TARGET_RMS_DBFS`).
+  `pitch=` selects the trajectory via `_make_pitch`: `"quantized"` (default;
+  byte-identical train/inference prior), `"quantized_vibrato"`, or `"bend"`
   (Studio bend-mode). The single prior source of truth reused at inference.
+- `QuantizedVibrato` (`pitch="quantized_vibrato"`) — `Quantized`'s constant note
+  frequency multiplied by `vibrato_model.vibrato_ratio(note.vib_params, n, sr)` when
+  an in-memory producer attached params, and **exactly** `Quantized` when it did not
+  (so every disk-loaded MIDI renders byte-identically — guarded by
+  `test notebooks/vibrato_param_experiment/prior_identity_guard_vib.py --check`).
+  An unrecognized `note.vib_model` also falls back to the constant rather than
+  raising: one stale note must not abort a whole render. `Labeler.compile` uses this
+  mode (`CompileParams.prior_pitch`).
+- **Per-note attributes the render loop reads off in-memory `pretty_midi.Note`s**:
+  `note.env_dct` (else the legacy `velocity/127` gain) and `note.vib_params` /
+  `note.vib_model` (only in `quantized_vibrato` mode). Both are attached by
+  `Labeler.midi_io.notes_to_pretty_midi(..., with_env=, with_vibrato=)` and neither
+  survives a `.write()` — disk MIDIs are unaffected by design.
 - `PriorSynth.render(midi, sr=SR, total_samples=None)` and `note_onsets(midi)`
   accept **either a path to a `.mid` or an in-memory `pretty_midi.PrettyMIDI`** —
   so the Labeler renders a prior straight from a note list
@@ -220,6 +239,74 @@ prior shape).
 - The mel front-end is deliberately **not** in the pipeline — the caller mels
   after any alignment shift, via `common.vocoder.mel_frames`.
 - CLI: `python -m common.prior clip.mid -o clip_prior.wav`.
+
+### envelope.py — per-note energy envelope (`env_dct`), the prior's dynamics
+Describes a note's loudness *shape* with 3 cosine (DCT-I-style) coefficients fit to
+its A-weighted power-dB envelope — the fidelity knee found by
+`test notebooks/envelope_param_experiment` (~1.6 dB median reconstruction RMSE).
+gt_arky's MIDI velocity carries almost no dynamic information (r ≈ 0.22–0.26 with
+actual loudness), so this replaces it in the prior. numpy + librosa only (torch-free).
+- `loudness_db(y, sr=SR)` — `[T]` per-frame A-weighted loudness in power-dB (STFT
+  power, A-weighting applied in the **linear power** domain, mean over bins,
+  `10*log10`). Uses the repo's `N_FFT`/`HOP_SIZE` (2048/512), not the F0 hop.
+- `fit_env_dct(env_db)` → `[c0, c1, c2]` = **level, tilt, arch** over basis
+  `cos(k*pi*(i+0.5)/L)`; always length 3 (degenerate `L` zero-pads).
+- `eval_env_dct(coeffs, u)` — the continuous form at normalized position `u ∈ [0,1)`.
+- `env_gain(coeffs, n_samples)` — per-sample **linear amplitude** gain
+  (`10**(dB/20)`) sampled at note-relative midpoints; what `PriorSynth.render`
+  multiplies the source by. Only cross-note level and within-note shape survive the
+  whole-clip `MaskedRMS` match, which cancels the absolute dB offset.
+- `note_env_from_wav(loud_db, start_s, end_s, ...)` — slice a note out of a clip
+  loudness track (repo `frame_of` rounding) and fit it.
+- `velocity_to_env_dct(velocity)` → `[A*vel + B, 0, 0]` — the flat fallback for notes
+  with no measurement. `VEL_C0_A`/`VEL_C0_B` are a **UI-anchored** map (vel 1..127 →
+  −30..+16 dB, the Labeler/Studio envelope-lane display range) so a velocity drag and
+  an envelope-handle drag move level at the same dB-per-pixel rate; mirrored in
+  `Labeler/static/js/state.js`.
+
+### vibrato_model.py — per-note vibrato params (`vib_params`), the prior's vibrato
+The `quantized` prior holds every note at its exact MIDI frequency, so vibrato is the
+one thing a violin recording always has and the prior never does. This measures a
+note's F0 modulation (pyin) and compresses it to a handful of numbers `prior.py`
+replays as a per-sample frequency ratio. numpy + librosa + scipy (torch-free).
+- **Registry** `MODELS: {name: VibratoModel}` with `VIB_MODEL = "rampboth5"` the
+  single swap point. `rampboth5` `[D0, gD, f0, s, phi]`: half-depth ramp
+  `D(t)=clip(D0+gD·t, 0, 200)` cents, rate ramp `f(t)=f0+s·t` Hz, phase
+  `Φ(t)=2π(f0·t + s·t²/2)+phi`, `osc = D(t)·sin(Φ)`. Alternates: `dramp4`
+  `[D0, gD, f, phi]` and `lfo3` `[D, f, phi]` (also `rampboth5`'s warm-start parent).
+  Unknown model name → `ValueError` from every public entry point.
+- **Selection + tiering** (`test notebooks/vibrato_param_experiment`, 921 fittable
+  vibrato notes over the 37 verified gt_arky clips; median in-sample cents RMSE
+  against a **7.72** no-model floor): `rampboth5` 5 params → **4.29**; `dramp4` 4 →
+  4.95 (better-behaved rate, pick this if a smaller model is ever wanted); `lfo3`
+  3 → 5.57. Caveat: the fitted `f0`/`s` are **curve-fit parameters, not a rate
+  measurement** (r = 0.089 vs the `auto.vibrato_rate_hz` detector; `f0` pinned at a
+  bound on ~30% of notes) — read `auto.vibrato_rate_hz` for anything human-readable.
+- **Parameters are absolute-time and onset-anchored**, never duration-relative, so a
+  note-boundary edit cannot silently change their meaning — and the unregularized
+  ramps extrapolate badly, so a producer must *clear* params on a boundary edit and
+  re-measure (the Labeler front-end does).
+- **The affine nuisance baseline `b0 + b1·t` is fitted jointly and discarded** — it
+  absorbs intonation offset and slide, which are not vibrato. Pre-detrending instead
+  would let a half-cycle of vibrato leak into the slope. It is never stored.
+- `f0_hz_track(y, sr=SR)` — whole-clip `librosa.pyin` (hop 256 / frame 1024 / 175–2100
+  Hz / `resolution=0.05`), `[T]` Hz with NaN unvoiced. Per-note extraction is wrong
+  here (Viterbi restarts would land artifacts on the note boundaries). **Slow: ~3.5×
+  the clip duration** (a measured 24 s clip took 84 s).
+- `note_cents_from_track(f0_hz, pitch, start_s, end_s, ...)` → `(t_rel, cents)`; cents
+  vs the **scored** pitch, `t_rel` from true frame times so slice rounding never
+  shifts the timebase.
+- `mask_note(t, cents)` — drop unvoiced, drop `|cents| > 200` (octave slips), then
+  despike at 5 robust sigma of the 3-frame median deviation.
+- `fit_note_vibrato(f0_hz, pitch, start_s, end_s, ...)` → params (4 dp) or `None`.
+  Rejects `dur < 0.25 s`, `< 12` surviving frames, or `< 50%` surviving. Multi-start:
+  top-2 Lomb-Scargle peaks (3.5–10 Hz) + the optional `auto_rate_hz` seed, deduped at
+  0.3 Hz, plus the `lfo3` warm start; `scipy.least_squares` trf with finite bounds and
+  explicit `x_scale`; lowest SSE wins.
+- `vibrato_cents(params, t, model=)` / `vibrato_ratio(params, n_samples, sr, model=)`
+  — the render path; `t = arange(n)/sr` keeps rendered phase on the fitted timebase.
+- `vibrato_from_auto(rate_hz, extent_cents)` — detector-shaped fallback params, gated
+  off by `VIB_FALLBACK = False` (an unfitted note renders flat, which is honest).
 
 ### onset_align.py — (prior, GT) onset alignment (in-memory, array-first)
 Measures the residual global time offset between a prior and its GT so priors can

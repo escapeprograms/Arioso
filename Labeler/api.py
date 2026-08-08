@@ -269,6 +269,61 @@ def compute_envelopes(clip_id: str, request: Request):
     return {"status": "ok", "rev": saved["rev"], "n_notes": len(env_by_id)}
 
 
+# --- vibrato-fit pass -------------------------------------------------------
+
+@router.post("/api/clips/{clip_id}/vibrato-fit")
+def fit_vibrato(clip_id: str, request: Request):
+    """Fit per-note vibrato params from the CURRENT note boundaries + ``cleaned.wav``.
+
+    One whole-clip pyin pass (restarting pyin per note would put decode artifacts at
+    exactly the note boundaries), then a per-note fit for every note flagged
+    ``vibrato``. Notes NOT flagged are explicitly cleared, so the stored params can
+    never contradict the labels. **Slow by design** — pyin dominates at ~3.5x the clip
+    duration (a measured 24 s clip took 84 s), so this is a minutes-long request on a
+    long clip and no caller may impose a short timeout. 409 while a job runs on the
+    clip (same gate as ``process``).
+
+    ``n_failed`` counts vibrato-marked notes the fitter rejected (too short, too few
+    voiced frames); those notes end up with no params and render without vibrato.
+    """
+    import os
+    import time
+    from common.vibrato_model import VIB_MODEL, f0_hz_track, fit_note_vibrato
+    cfg = _cfg(request)
+    jobs = _jobs(request)
+    if not _clip_exists(cfg, clip_id):
+        return _err(404, "clip_not_found", clip_id)
+    if jobs.is_running(clip_id):
+        return _err(409, "job_running", f"a job is running for {clip_id}; try again after it finishes")
+    doc = notes_store.load(cfg, clip_id)
+    if doc is None:
+        return _err(404, "no_notes", f"{clip_id} has no notes.json yet")
+    cleaned = clip_file(cfg, clip_id, CLEANED_WAV)
+    if not os.path.isfile(cleaned):
+        return _err(404, "not_processed", f"{clip_id} has no cleaned.wav yet (process it first)")
+    t0 = time.perf_counter()
+    y = load_mono(cleaned, sr=SR)
+    f0 = f0_hz_track(y, SR)
+    params_by_id: dict[str, list[float] | None] = {}
+    n_vibrato = 0
+    for n in doc.get("notes", []):
+        if not n.get("vibrato"):
+            params_by_id[n["id"]] = None       # clears any stale params
+            continue
+        n_vibrato += 1
+        params_by_id[n["id"]] = fit_note_vibrato(
+            f0, int(n["pitch"]), float(n["start_s"]), float(n["end_s"]), sr=SR,
+            auto_rate_hz=(n.get("auto") or {}).get("vibrato_rate_hz"))
+    saved = notes_store.set_vibrato_params(cfg, clip_id, params_by_id, VIB_MODEL)
+    if saved is None:
+        return _err(404, "no_notes", f"{clip_id} has no notes.json to fit yet")
+    n_fit = sum(1 for v in params_by_id.values() if v is not None)
+    return {"status": "ok", "rev": saved["rev"], "model": VIB_MODEL,
+            "n_notes": len(params_by_id), "n_vibrato": n_vibrato, "n_fit": n_fit,
+            "n_failed": n_vibrato - n_fit,
+            "elapsed_s": round(time.perf_counter() - t0, 2)}
+
+
 # --- compile (gt_arky -> standard dataset root) -----------------------------
 
 def _compiler(request: Request):
