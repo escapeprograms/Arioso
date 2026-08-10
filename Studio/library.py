@@ -57,6 +57,11 @@ def models_root(cfg: StudioConfig) -> str:
     return os.path.abspath(cfg.models_root)
 
 
+def vocoders_root(cfg: StudioConfig) -> str:
+    """Absolute vocoder root (``cfg.vocoders_root`` resolved against the cwd)."""
+    return os.path.abspath(cfg.vocoders_root)
+
+
 def project_dir(cfg: StudioConfig, project_id: str) -> str:
     return os.path.join(projects_root(cfg), project_id)
 
@@ -193,4 +198,51 @@ def scan_models(cfg: StudioConfig) -> list[dict]:
             "checkpoints": ckpts,
             "default": name == cfg.default_model,
         })
+    return out
+
+
+# --- vocoder discovery (pure filesystem; mirrors the model scan above) --------
+
+# A BigVGAN run dir is loadable only with both of these present (see
+# common.vocoder.load_vocoder); the scan requires them so the UI never offers a
+# vocoder that would fail at load time.
+VOCODER_CONFIG = "config.json"
+VOCODER_WEIGHTS = "bigvgan_generator.pt"
+
+# Studio's name for the stock HF BigVGAN baseline (no local dir); passed through
+# to load_vocoder, which understands it as "ignore the config default".
+HF_VOCODER = "hf"
+
+
+def vocoder_checkpoint_dir(cfg: StudioConfig, name: str) -> str:
+    """Map a Studio vocoder name to :func:`common.vocoder.load_vocoder`'s ``checkpoint_dir``.
+
+    A local name is a directory basename under ``vocoders_root`` and resolves to
+    that absolute dir; the ``"hf"`` sentinel passes straight through (the loader
+    reads it as "the stock HF checkpoint, ignoring ``common.config.VOCODER_DIR``").
+    """
+    if name == HF_VOCODER:
+        return HF_VOCODER
+    return os.path.join(vocoders_root(cfg), name)
+
+
+def scan_vocoders(cfg: StudioConfig) -> list[dict]:
+    """Scan ``vocoders_root`` for loadable BigVGAN run dirs -> ``[{name, default}]``.
+
+    A dir qualifies only when it holds BOTH ``config.json`` and
+    ``bigvgan_generator.pt``; results are sorted by name and the one equal to
+    ``cfg.default_vocoder`` is flagged ``default``. The stock ``"hf"`` baseline is
+    NOT included — it has no dir, so the API appends it to this list. No torch:
+    like :func:`scan_models` this only stats files.
+    """
+    root = vocoders_root(cfg)
+    if not os.path.isdir(root):
+        return []
+    out = []
+    for name in sorted(os.listdir(root)):
+        d = os.path.join(root, name)
+        if not (os.path.isfile(os.path.join(d, VOCODER_CONFIG))
+                and os.path.isfile(os.path.join(d, VOCODER_WEIGHTS))):
+            continue
+        out.append({"name": name, "default": name == cfg.default_vocoder})
     return out

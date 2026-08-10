@@ -188,6 +188,15 @@ class AriosoConfig:
     # Arioso.augment.
     adr_beta: float = 0.0            # ADR loss weight in L = L_FM + adr_beta*L_ADR (0 = off)
     adr_p: float = 1.0               # fraction of steps ADR is applied (per-step Bernoulli gate; paper: 1.0)
+    # Pitch-shift augmentation (deferred toggle, OFF): for a Bernoulli(pitch_aug_p) subset of TRAIN
+    # samples, both the prior and the target mel are recomputed from their waveforms with a
+    # DiffSinger keyshift of k ~ U(-pitch_aug_cents, +pitch_aug_cents), drawn fresh per sample per
+    # epoch. The shift is duration-preserving, so the frame grid — and with it every cond / onset /
+    # boundary track and the clip framing — is untouched. Requires ``prior_wav/`` in the root; a root
+    # predating it is never augmented (graceful fallback to the memmapped mels). See Arioso.pitch_aug
+    # + common.keyshift.
+    pitch_aug_p: float = 0.0         # fraction of train samples pitch-shifted (0 = off)
+    pitch_aug_cents: float = 100.0   # half-width of the uniform cents draw (100 = +/- 1 semitone)
 
     # --- Training (Section 8) ----------------------------------------------------
     lr: float = 2e-4
@@ -262,6 +271,9 @@ class AriosoConfig:
         # Anti-Drift Rectification invariants.
         assert self.adr_beta >= 0.0, "adr_beta must be >= 0.0"
         assert 0.0 <= self.adr_p <= 1.0, "adr_p must be in [0.0, 1.0]"
+        # Pitch-shift augmentation invariants.
+        assert 0.0 <= self.pitch_aug_p <= 1.0, "pitch_aug_p must be in [0.0, 1.0]"
+        assert self.pitch_aug_cents >= 0.0, "pitch_aug_cents must be >= 0.0"
 
 
 # --- Checkpoint (de)serialization ------------------------------------------------

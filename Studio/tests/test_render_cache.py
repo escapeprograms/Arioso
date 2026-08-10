@@ -3,8 +3,9 @@
 Replaces :func:`Studio.render._render_segments` with a fake that writes a dummy
 segment WAV per non-cached segment and records which hashes it was asked to render,
 so we can assert: a first render renders every segment, a no-op re-render renders
-none (all cache hits), and editing one note in one phrase re-renders exactly that
-phrase's segment while the other stays a cache hit. Torch-free.
+none (all cache hits), editing one note in one phrase re-renders exactly that
+phrase's segment while the other stays a cache hit, and swapping the vocoder
+invalidates every segment (then revives them on the way back). Torch-free.
 """
 
 from __future__ import annotations
@@ -26,10 +27,12 @@ class FakeRenderer:
 
     def __init__(self):
         self.calls: list[list[str]] = []      # hashes rendered per invocation
+        self.vocoders: list[str] = []         # vocoder name per invocation
 
     def __call__(self, cfg, doc, to_render, cache_dir, model, checkpoint,
-                 prior_mode, device, progress):
+                 prior_mode, vocoder, device, progress):
         self.calls.append([s["hash"] for s in to_render])
+        self.vocoders.append(vocoder)
         for seg in to_render:
             span = (seg["end_s"] + seg["pad_tail"]) - (seg["start_s"] - seg["pad_lead"])
             n = max(1, int(round(span * SR)))
@@ -54,10 +57,25 @@ def _two_phrase_notes():
     ]
 
 
-def _project(tmp_path):
+def _stub_vocoders(tmp_path, sizes=(("voc_a", 16), ("voc_b", 32))):
+    """A stub ``vocoders_root`` with loadable-looking dirs of differing weight sizes.
+
+    Sizes differ so the two vocoders get distinct cache ids (``<name>:<size>``)
+    without touching the real (half-gigabyte) generators.
+    """
+    root = tmp_path / "vocoders"
+    for name, nbytes in sizes:
+        d = root / name
+        d.mkdir(parents=True)
+        (d / "config.json").write_text("{}", encoding="utf-8")
+        (d / "bigvgan_generator.pt").write_bytes(b"\0" * nbytes)
+    return str(root)
+
+
+def _project(tmp_path, **over):
     cfg = load_config()
     import dataclasses
-    cfg = dataclasses.replace(cfg, projects_root=str(tmp_path / "projects"))
+    cfg = dataclasses.replace(cfg, projects_root=str(tmp_path / "projects"), **over)
     doc = create_project(cfg, "song", name="Song")
     doc = dict(doc)
     doc["bpm"] = 120.0
@@ -130,6 +148,39 @@ def test_edit_one_note_rerenders_only_its_segment(tmp_path, monkeypatch):
     m = read_json(render_meta_file(cfg, edited_doc["project_id"]))
     assert m["segments_rendered"] == 1
     assert m["segments_cached"] == 1
+
+
+def test_vocoder_switch_invalidates_then_revives_cache(tmp_path, monkeypatch):
+    # A vocoder swap changes every segment hash (the audio genuinely differs), and
+    # swapping back hits the segments the first pass left in the cache.
+    from Studio.library import read_json
+
+    fake = FakeRenderer()
+    monkeypatch.setattr(render_mod, "_render_segments", fake)
+    vroot = _stub_vocoders(tmp_path)
+    cfg, doc = _project(tmp_path, vocoders_root=vroot, default_vocoder="voc_a")
+    pdir = _pdir(cfg, doc)
+
+    meta_a = render_mod.run_render(cfg, doc, pdir)
+    assert meta_a["segments_rendered"] == 2
+    assert meta_a["vocoder"] == "voc_a"
+    assert fake.vocoders == ["voc_a"]
+
+    # Same vocoder again -> all cached.
+    assert render_mod.run_render(cfg, doc, pdir)["segments_rendered"] == 0
+
+    # Switch -> every segment re-renders under the new identity.
+    meta_b = render_mod.run_render(cfg, doc, pdir, vocoder="voc_b")
+    assert meta_b["segments_rendered"] == 2
+    assert meta_b["vocoder"] == "voc_b"
+    assert fake.vocoders[-1] == "voc_b"
+    assert set(fake.calls[-1]).isdisjoint(fake.calls[0])   # different hashes
+
+    # ... and switching back reuses the first pass's cached segments.
+    meta_a2 = render_mod.run_render(cfg, doc, pdir, vocoder="voc_a")
+    assert meta_a2["segments_rendered"] == 0
+    assert meta_a2["segments_cached"] == 2
+    assert read_json(render_meta_file(cfg, doc["project_id"]))["vocoder"] == "voc_a"
 
 
 def test_empty_project_renders_silence(tmp_path, monkeypatch):

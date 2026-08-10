@@ -25,8 +25,19 @@ def client(tmp_path):
         d.mkdir(parents=True)
         for c in ckpts:
             (d / c).write_bytes(b"")
+    # Fake vocoder dirs: only ones holding BOTH config.json and the generator are
+    # listed (``half_baked`` is missing the weights, ``stray`` is a loose file).
+    vocoders = tmp_path / "vocoders"
+    for name, files in {"ft_v2": ["config.json", "bigvgan_generator.pt"],
+                        "half_baked": ["config.json"]}.items():
+        d = vocoders / name
+        d.mkdir(parents=True)
+        for f in files:
+            (d / f).write_bytes(b"")
+    (vocoders / "stray.txt").write_bytes(b"")
     cfg = dataclasses.replace(load_config(), projects_root=str(projects),
-                              models_root=str(models))
+                              models_root=str(models),
+                              vocoders_root=str(vocoders))
     return TestClient(create_app(cfg))
 
 
@@ -39,6 +50,7 @@ def test_get_config(client):
     assert body["frame_rate"] == pytest.approx(44100 / 512)
     assert body["default_model"] == "7-9-adr"
     assert body["default_checkpoint"] == "checkpoint_final.pt"
+    assert body["default_vocoder"] == "ft_v2"
     assert body["default_prior_mode"] == "bend"
     assert body["prior_modes"] == ["bend", "quantized"]
     names = [a["name"] for a in body["articulations"]]
@@ -58,6 +70,15 @@ def test_get_models(client):
     assert runs["7-9-adr"]["default"] is True
     assert runs["lr_anneal"]["default"] is False
     assert runs["7-9-adr"]["checkpoints"] == ["checkpoint_final.pt", "checkpoint_step5000.pt"]
+
+
+def test_get_models_lists_vocoders(client):
+    body = client.get("/api/models").json()
+    # half_baked (no generator) and the loose file are excluded; "hf" is appended.
+    assert [v["name"] for v in body["vocoders"]] == ["ft_v2", "hf"]
+    flags = {v["name"]: v["default"] for v in body["vocoders"]}
+    assert flags == {"ft_v2": True, "hf": False}
+    assert body["default_vocoder"] == "ft_v2"
 
 
 def test_projects_crud_flow(client):

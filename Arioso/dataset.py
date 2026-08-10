@@ -22,6 +22,7 @@ from common.dataset_schema import DatasetRoot
 
 from .clips import Clip, _basenames_per_root, enumerate_clips, open_roots
 from .config import AriosoConfig, BoundaryCondSpec, CondSpec
+from .pitch_aug import PitchAug, build_pitch_aug, shifted_pair, wavs_available
 from .splits import make_splits
 
 
@@ -71,13 +72,24 @@ class AriosoDataset(Dataset):
       A root missing that array (or an empty one) yields all ``-1`` (the inactive/zero state).
 
     With no specs the item dict is exactly as before (no ``"cond"`` key).
+
+    **Pitch-shift augmentation** (``pitch_aug``, see :mod:`Arioso.pitch_aug`): for a per-sample
+    Bernoulli subset, ``x0``/``x1`` are re-melled from the clip's ``prior_wav/`` / ``gt/`` waveforms
+    at a random shift instead of read from the mel memmaps. The shift is duration-preserving, so
+    ``length`` and every cond/boundary track below are unaffected. Inactive by default (and for
+    ``None``): no RNG is drawn, no waveform is opened, and every item is **byte-identical** to the
+    pure-memmap path.
     """
 
     def __init__(self, roots: list[DatasetRoot], clips: list[Clip],
-                 specs: tuple[CondSpec | BoundaryCondSpec, ...] = ()):
+                 specs: tuple[CondSpec | BoundaryCondSpec, ...] = (),
+                 pitch_aug: PitchAug | None = None):
         self.roots = roots
         self.clips = clips
         self.specs = tuple(specs)
+        self.pitch_aug = pitch_aug
+        self.epoch = 0
+        self._wav_ok: dict[tuple[str, str], bool] = {}
 
     def __len__(self) -> int:
         return len(self.clips)
@@ -85,11 +97,37 @@ class AriosoDataset(Dataset):
     def lengths(self) -> list[int]:
         return [c.end - c.start for c in self.clips]
 
+    def set_epoch(self, epoch: int) -> None:
+        """Set the per-epoch token seeding the pitch-shift draws (fresh shifts each epoch).
+
+        Mirrors :meth:`LengthBucketBatchSampler.set_epoch`, which the training loop already calls
+        with the same value. Purely bookkeeping when the augmentation is inactive.
+        """
+        self.epoch = epoch
+
+    def _wavs_ok(self, root: DatasetRoot, base: str) -> bool:
+        """Cached :func:`~Arioso.pitch_aug.wavs_available` per ``(root.path, base)``."""
+        key = (root.path, base)
+        ok = self._wav_ok.get(key)
+        if ok is None:
+            ok = wavs_available(root, base)
+            self._wav_ok[key] = ok
+        return ok
+
     def __getitem__(self, i: int) -> dict:
         c = self.clips[i]
         root = self.roots[c.root]
-        x0 = np.load(root.prior_mel_path(c.basename), mmap_mode="r")[:, c.start:c.end]
-        x1 = np.load(root.target_mel_path(c.basename), mmap_mode="r")[:, c.start:c.end]
+        x0 = x1 = None
+        if self.pitch_aug is not None and self.pitch_aug.active:
+            # Draw FIRST, availability second: the RNG stream depends only on (seed, epoch, index),
+            # never on which roots happen to carry prior_wav/.
+            cents = self.pitch_aug.cents_for(self.epoch, i)
+            if cents is not None and self._wavs_ok(root, c.basename):
+                x0, x1 = shifted_pair(root, c.basename, c.start, c.end,
+                                      cents, self.pitch_aug.margin)
+        if x0 is None:
+            x0 = np.load(root.prior_mel_path(c.basename), mmap_mode="r")[:, c.start:c.end]
+            x1 = np.load(root.target_mel_path(c.basename), mmap_mode="r")[:, c.start:c.end]
         item = {
             "x0": torch.from_numpy(np.ascontiguousarray(x0, dtype=np.float32)),
             "x1": torch.from_numpy(np.ascontiguousarray(x1, dtype=np.float32)),
@@ -201,14 +239,21 @@ def build_dataloader(data_roots, split_name: str, batch_size: int,
     Conditioning (``cfg.conditioning``) flows through: the dataset loads each spec's id track (or the
     unknown fill for a root lacking that signal) and ``collate`` (bound to the specs via
     ``functools.partial``, kept picklable for num_workers>0) packs it into ``batch["cond"]``.
+
+    Pitch-shift augmentation is wired here too, via :func:`~Arioso.pitch_aug.build_pitch_aug` — which
+    returns an inactive policy for every split but ``"train"``, so only the train loader can ever
+    augment (the val metric always scores the real mels).
     """
     cfg = cfg or AriosoConfig()
     roots = open_roots(list(data_roots))
     split = make_splits(roots, cfg)
     per_root = _basenames_per_root(roots, split[split_name])
     clips = enumerate_clips(roots, per_root, cfg)
-    ds = AriosoDataset(roots, clips, specs=cfg.conditioning)
+    ds = AriosoDataset(roots, clips, specs=cfg.conditioning,
+                       pitch_aug=build_pitch_aug(cfg, split_name))
     sampler = LengthBucketBatchSampler(ds.lengths(), batch_size, shuffle=shuffle, seed=cfg.seed)
     collate_fn = functools.partial(collate, specs=cfg.conditioning)
+    # persistent_workers stays at its default False: a persistent worker would hold a stale copy of
+    # the dataset and never see set_epoch, freezing the pitch-shift draws at epoch 0.
     loader = DataLoader(ds, batch_sampler=sampler, collate_fn=collate_fn, num_workers=num_workers)
     return loader

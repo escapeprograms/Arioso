@@ -73,6 +73,7 @@ export async function getConfig(){
     keys: Object.fromEntries(ARTICULATIONS.map(a => [a.key, a.name])),
     default_model: '7-9-adr',
     default_checkpoint: 'checkpoint_final.pt',
+    default_vocoder: 'ft_v2',
     default_prior_mode: 'bend',
     pitch_range: { min: 40, max: 100 },
     prior_modes: ['bend', 'quantized'],
@@ -80,14 +81,21 @@ export async function getConfig(){
 }
 
 export async function getModels(){
-  // Mirrors the real GET /api/models object shape (run/checkpoints/default + defaults).
+  // Mirrors the real GET /api/models object shape (run/checkpoints/default + vocoders + defaults).
   return {
     models: [
       { run: '7-9-adr', checkpoints: ['checkpoint_final.pt', 'checkpoint_100k.pt'], default: true },
       { run: '7-7-offline-aug', checkpoints: ['checkpoint_final.pt'], default: false },
     ],
+    vocoders: [
+      { name: 'ft_v1', default: false },
+      { name: 'ft_v2', default: true },
+      { name: 'ft_v3', default: false },
+      { name: 'hf', default: false },
+    ],
     default_model: '7-9-adr',
     default_checkpoint: 'checkpoint_final.pt',
+    default_vocoder: 'ft_v2',
   };
 }
 
@@ -197,7 +205,8 @@ export async function startRender(id, opts = {}){
   };
   setTimeout(advance, 400);
   return { status: 'accepted', project_id: id, scope: opts.scope || 'phrase',
-           model: opts.model, checkpoint: opts.checkpoint, prior_mode: opts.prior_mode };
+           model: opts.model, checkpoint: opts.checkpoint,
+           vocoder: opts.vocoder || 'ft_v2', prior_mode: opts.prior_mode };
 }
 
 export async function getRenderStatus(id){
@@ -251,6 +260,7 @@ function buildFakeRender(id, proj, opts){
     duration_s: durS,
     model: opts.model || '7-9-adr',
     checkpoint: opts.checkpoint || 'checkpoint_final.pt',
+    vocoder: opts.vocoder || 'ft_v2',
     prior_mode: opts.prior_mode || 'bend',
     scope: opts.scope || 'phrase',
     note_ids: (sel ? opts.note_ids : null),

@@ -13,6 +13,10 @@ integration. The architecture is reconstructed
 from the checkpoint's embedded config (``cfg_from_dict``), so pre-conditioning checkpoints load
 unchanged. Long sequences are processed in overlapping chunks with a linear crossfade. The mel is
 turned to audio with the **frozen** BigVGAN-v2 vocoder (listening only — never a selection arbiter).
+
+Both checkpoints default to the project's own: ``--ckpt`` to ``common.config.ACOUSTIC_CKPT`` and
+``--vocoder`` to ``common.config.VOCODER_DIR`` (the violin fine-tune); pass ``--vocoder hf`` to
+listen through the stock HF baseline instead.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ import os
 import numpy as np
 import torch
 
+from common.config import ACOUSTIC_CKPT
 from common.dataset_schema import (ARTICULATIONS, NoteEvent, offset_frames,
                                    onset_frames, rasterize_articulation,
                                    rasterize_velocity, rasterize_vibrato)
@@ -187,8 +192,13 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("midi", help="input score (.mid)")
     ap.add_argument("-o", "--out", default=os.path.join(SAMPLES_DIR, "arioso_out.wav"))
-    ap.add_argument("--ckpt", required=True, help="checkpoint .pt (uses EMA weights)")
+    ap.add_argument("--ckpt", default=ACOUSTIC_CKPT,
+                    help="checkpoint .pt (uses EMA weights) "
+                         "(default: the project default, common.config.ACOUSTIC_CKPT)")
     ap.add_argument("--weights", choices=("ema", "model"), default="ema")
+    ap.add_argument("--vocoder", default=None, metavar="DIR|hf",
+                    help="BigVGAN checkpoint dir, or 'hf' for the stock HF baseline "
+                         "(default: the project default, common.config.VOCODER_DIR)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--solver", choices=tuple(SOLVERS), default=None,
                     help="integration method (default: config's 'euler')")
@@ -230,7 +240,7 @@ def main() -> None:
     if args.save_mel:
         np.save(args.save_mel, mel)
 
-    voc = load_vocoder(device=args.device)                      # frozen; also asserts mel contract
+    voc = load_vocoder(device=args.device, checkpoint_dir=args.vocoder)   # frozen; asserts mel contract
     audio = vocode(voc, torch.from_numpy(mel[None]).float())
     from common.audio_io import write_pcm16
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)

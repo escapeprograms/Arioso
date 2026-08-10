@@ -318,7 +318,9 @@ def export_newest_snapshot(run_dir: str, name: Optional[str] = None) -> Optional
     Returns the export dir, or None if the run dir holds no snapshot.
 
     Deliberately does NOT touch ``common.config.VOCODER_DIR``: promotion to the
-    active default stays a manual step, gated on an eval_ab listen.
+    active default stays a manual step, gated on an eval_ab listen — or just select
+    it in Studio's DEV drawer (exports under Vocoder/models/ are picked up
+    automatically).
     """
     run_dir = os.path.abspath(run_dir)
     snaps = sorted(glob.glob(os.path.join(run_dir, "g_" + "?" * 8)))
@@ -341,7 +343,9 @@ def export_newest_snapshot(run_dir: str, name: Optional[str] = None) -> Optional
     shutil.copyfile(config_src, os.path.join(export_dir, "config.json"))
     print(
         "[INFO] Export complete. To make it the active default, point "
-        f"common/config.py::VOCODER_DIR at {export_dir} (after an eval_ab check)."
+        f"common/config.py::VOCODER_DIR at {export_dir} (after an eval_ab check) "
+        "— or just select it in Studio's DEV drawer (exports under Vocoder/models/ "
+        "are picked up automatically)."
     )
     return export_dir
 
@@ -463,9 +467,9 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--dataset", default="Data/datasets/vocoder_ft")
     parser.add_argument("--run-dir", default=_DEFAULT_RUN_DIR)
     parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--segment-size", type=int, default=32768)
+    parser.add_argument("--segment-size", type=int, default=16384)
     parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--extra-steps", type=int, default=10000)
+    parser.add_argument("--extra-steps", type=int, default=20000)
     parser.add_argument("--checkpoint-interval", type=int, default=2500)
     parser.add_argument("--validation-interval", type=int, default=1000)
     parser.add_argument("--summary-interval", type=int, default=25)

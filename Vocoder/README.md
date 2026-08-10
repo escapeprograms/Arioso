@@ -49,7 +49,7 @@ Note: add --run-dir Vocoder/runs/XXXX to start from scratch on a new run
 > peak ~7.5 GiB, survives full-chunk validation passes. Both shipped runs (ft_v1, ft_v2)
 > used it.
 
-Useful knobs: `--extra-steps` (default 10000 added steps), `--run-dir`
+Useful knobs: `--extra-steps` (default 20000 added steps), `--run-dir`
 (default `Vocoder/runs/ft_v1`), `--checkpoint-interval` (2500), `--validation-interval`
 (1000), `--no-validation` (maps to trainer `--debug True`; skips ALL validation loops —
 diagnostic only), `--freeze-extra N` (freeze the discriminator for the first N added
@@ -86,6 +86,15 @@ not regress badly). Writes `metrics.csv` + paired
    `config.VOCODER_DIR` > HF hub; `checkpoint_dir="hf"` forces the pretrained baseline
    (that's what `eval_ab` uses for the A side). Studio's render cache auto-invalidates
    (cache key includes vocoder dirname + file size).
+3. **Editing the config is no longer the only way to A/B.** Both callers can pick a
+   vocoder per run without touching `VOCODER_DIR`:
+   - **Studio** — the DEV drawer (gear) has a **Vocoder** dropdown listing every dir
+     under `Vocoder/models/` that holds both `config.json` and `bigvgan_generator.pt`
+     (so a fresh export appears with no config edit), plus `stock (HF)` for the
+     pretrained baseline. The selection goes into the render POST and is recorded in
+     `render/meta.json`; `VOCODER_DIR` only decides which entry is pre-selected.
+   - **CLI** — `python -m Arioso.infer score.mid --vocoder Vocoder/models/ft_v3`
+     (or `--vocoder hf`); `Arioso.eval.copy_synthesis` takes the same flag.
 
 ## Run history
 

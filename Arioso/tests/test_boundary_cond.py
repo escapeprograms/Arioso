@@ -173,14 +173,17 @@ def test_parse_boundary_unknown_field_errors():
         _parse_conditioning([{"name": "time_since_onset", "nonsense": 1}], "test.yaml")
 
 
-# --- end-to-end: the shipped config resolves to five specs, cond_dim 272 ---------
+# --- end-to-end: the shipped config resolves to four specs, cond_dim 208 ---------
 
 def test_conditioned_gt_arky_yaml_resolves():
+    # Four signals, not five: the env_dct work (2026-07) dropped the velocity conditioning track —
+    # per-note dynamics are baked into prior_mel instead. cond_dim = 64 (articulation) + 16
+    # (vibrato) + 64 + 64 (the two boundary signals).
     import os
     from Arioso.run_config import load_config
 
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     path = os.path.join(here, "configs", "conditioned_gt_arky.yaml")
     cfg, _run = load_config(path)
-    assert len(cfg.conditioning) == 5
-    assert cfg.cond_dim == 272
+    assert len(cfg.conditioning) == 4
+    assert cfg.cond_dim == 208

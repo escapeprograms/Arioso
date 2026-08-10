@@ -20,7 +20,9 @@ reported to the polling UI through the ``progress(status)`` callback the
      conditioning, the segment's notes are rasterized to cond tracks
      (``_segment_note_events`` -> ``Arioso.infer.build_cond``) on the prior mel's
      grid; an unconditioned checkpoint passes ``cond_frames=None`` unchanged.
-  4. **vocoder** — the frozen BigVGAN-v2 vocoder -> float32 segment waveform.
+  4. **vocoder** — the frozen BigVGAN-v2 vocoder the render selected (a fine-tuned
+     generator under ``cfg.vocoders_root``, or the stock ``"hf"`` checkpoint)
+     -> float32 segment waveform.
   5. **write** — the segment WAV to the cache; then ``mix.wav`` (PCM16) + ``mix.peaks``
      + ``render/meta.json`` (with the segment manifest) after all segments exist.
 
@@ -150,15 +152,17 @@ def _segment_note_events(sub: dict, tech_map: dict[str, str],
 
 
 def _render_segments(cfg, doc: dict, to_render: list[dict], cache_dir: str,
-                     model: str, checkpoint: str, prior_mode: str,
+                     model: str, checkpoint: str, prior_mode: str, vocoder: str,
                      device: str | None, progress) -> tuple[str, list[str]]:
     """Synthesize each non-cached segment in ``to_render`` to its cache WAV.
 
     Owns every torch import (kept inside the body so the module stays torch-free)
     and the lazy model/vocoder singletons; the two GPU forwards run under
-    ``GPU_LOCK``. Returns ``(device, warnings)``. Extracted as a module-level
-    function so the end-to-end tests can monkeypatch out the whole GPU pipeline and
-    assert exactly the non-cached segments were rendered.
+    ``GPU_LOCK``. ``vocoder`` is a Studio vocoder name (a dir under
+    ``cfg.vocoders_root``, or ``"hf"``), resolved to the loader's ``checkpoint_dir``
+    here. Returns ``(device, warnings)``. Extracted as a module-level function so
+    the end-to-end tests can monkeypatch out the whole GPU pipeline and assert
+    exactly the non-cached segments were rendered.
     """
     import torch
 
@@ -168,6 +172,7 @@ def _render_segments(cfg, doc: dict, to_render: list[dict], cache_dir: str,
     from common.vocoder import mel_frames, vocode
 
     from .library import models_root as _models_root
+    from .library import vocoder_checkpoint_dir
     from .model_registry import get_model, get_vocoder
 
     n_render = len(to_render)
@@ -176,7 +181,8 @@ def _render_segments(cfg, doc: dict, to_render: list[dict], cache_dir: str,
     loaded = get_model(_models_root(cfg), model, checkpoint, device=device)
     _emit(progress, "vocoder", 12, "loading vocoder",
           segments_done=0, segments_total=n_render)
-    voc = get_vocoder(loaded.device)
+    voc = get_vocoder(loaded.device,
+                      checkpoint_dir=vocoder_checkpoint_dir(cfg, vocoder))
     pitch = "bend" if prior_mode == "bend" else "quantized"
     # Per-frame conditioning tracks are built only when the checkpoint expects them; an
     # unconditioned checkpoint keeps cond_frames=None. tech_map resolves each note's technique
@@ -227,7 +233,8 @@ def _render_segments(cfg, doc: dict, to_render: list[dict], cache_dir: str,
 def run_render(cfg, doc: dict, project_dir: str, *, scope: str = "phrase",
                note_ids: list[str] | None = None, model: str | None = None,
                checkpoint: str | None = None, prior_mode: str | None = None,
-               device: str | None = None, progress=None) -> dict:
+               vocoder: str | None = None, device: str | None = None,
+               progress=None) -> dict:
     """Render ``doc`` to ``render/mix.wav`` (segment-cached) and return render meta.
 
     ``scope="phrase"`` renders the whole document; ``scope="selection"`` renders the
@@ -236,12 +243,15 @@ def run_render(cfg, doc: dict, project_dir: str, *, scope: str = "phrase",
     note's segment hash, so exactly the touched segment(s) miss and are re-rendered,
     while untouched cached segments are reused. Any non-cached untouched segment is
     still rendered so the mix is complete (e.g. a first-ever render). ``model`` /
-    ``checkpoint`` / ``prior_mode`` default to the config defaults. ``progress`` is
-    the JobManager status callback.
+    ``checkpoint`` / ``prior_mode`` / ``vocoder`` default to the config defaults
+    (``vocoder`` is a name: a dir under ``cfg.vocoders_root``, or ``"hf"`` for the
+    stock BigVGAN — it is folded into the segment hashes, so swapping it
+    re-renders everything). ``progress`` is the JobManager status callback.
     """
     model = model or cfg.default_model
     checkpoint = checkpoint or cfg.default_checkpoint
     prior_mode = prior_mode or cfg.default_prior_mode
+    vocoder = vocoder or cfg.default_vocoder
     sel_ids = set(note_ids) if (scope == "selection" and note_ids) else None
     project_id = doc.get("project_id") or os.path.basename(project_dir.rstrip("/\\"))
 
@@ -251,7 +261,8 @@ def run_render(cfg, doc: dict, project_dir: str, *, scope: str = "phrase",
 
     # -- plan (torch-free): segment, hash, detect cache hits ----------------
     _emit(progress, "serialize", 2, "planning segments")
-    plan = plan_render(doc, cfg, model, checkpoint, prior_mode, cache_dir=cache_dir)
+    plan = plan_render(doc, cfg, model, checkpoint, prior_mode, vocoder=vocoder,
+                       cache_dir=cache_dir)
     segments = plan["segments"]
     total_segs = len(segments)
     to_render = [s for s in segments if not s["cached"]]
@@ -264,7 +275,7 @@ def run_render(cfg, doc: dict, project_dir: str, *, scope: str = "phrase",
     if n_render:
         loaded_device, seg_warn = _render_segments(
             cfg, doc, to_render, cache_dir, model, checkpoint, prior_mode,
-            device, progress)
+            vocoder, device, progress)
         warnings.extend(seg_warn)
 
     # -- stitch + write -----------------------------------------------------
@@ -307,6 +318,7 @@ def run_render(cfg, doc: dict, project_dir: str, *, scope: str = "phrase",
         "model": model,
         "checkpoint": checkpoint,
         "prior_mode": prior_mode,
+        "vocoder": vocoder,
         "scope": scope,
         "note_ids": list(note_ids) if sel_ids is not None else None,
         "device": loaded_device,

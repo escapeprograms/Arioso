@@ -19,7 +19,7 @@ PY="C:/Users/archi/Miniconda3/envs/ai-violin/python.exe"
 "$PY" -m Labeler.server                     # http://127.0.0.1:8765  (/ redirects to /static/)
 "$PY" -m Labeler.processing <wav-or-clip-id> [--force-from STAGE] [--notes-mode MODE]   # headless
 "$PY" -m Labeler.compile [--all | <clip_id> ...] [--config PATH] [--force]              # compile verified clips
-"$PY" -m pytest Labeler/tests -q            # 55 tests, no GPU/network
+"$PY" -m pytest Labeler/tests -q            # 60 tests, no GPU/network
 ```
 
 Pipeline (per clip, cached per stage by params-hash):
@@ -45,9 +45,10 @@ Installed into **ai-violin** on top of the training stack: `torchaudio==2.6.0+cu
   (CANONICAL annotations), `notes.backup/` (rolling 20 revs + named snapshots),
   `status.json` (server-owned stage state/hashes).
 - compile output → `CompileParams.root` (default `Data/datasets/gt_arky`), the standard
-  dataset-root layout (`manifest.json`, `gt/<id>.wav`, `target_mel/`, `prior_mel/`, `onsets/`,
-  `cond/{articulation,velocity,vibrato}/<id>.npy`) — the contract + encodings are documented in
-  `common/README.md` (this root sets `signals: [articulation, velocity, vibrato]`).
+  dataset-root layout (`manifest.json`, `gt/<id>.wav`, `target_mel/`, `prior_mel/`,
+  `prior_wav/<id>.wav`, `onsets/`, `offsets/`,
+  `cond/{articulation,vibrato}/<id>.npy`) — the contract + encodings are documented in
+  `common/README.md` (this root sets `signals: [articulation, vibrato]`).
 - `clip_id` = raw filename stem sanitized to `[A-Za-z0-9_-]`.
 
 ## notes.json schema (v1) + label preservation
@@ -214,7 +215,8 @@ at playhead, `g` mute-region paint on ruler. Wheel pans time; ctrl+wheel zooms (
   normalize the chosen wav → `gt/`, mel → `target_mel/`, prior (surviving notes →
   `notes_to_pretty_midi(with_env=True, with_vibrato=True)` →
   `common.prior.quantized_prior(pitch=cp.prior_pitch).render`, so each note's measured
-  envelope **and** vibrato are baked in) → `prior_mel/`, `onsets/` + `offsets/`
+  envelope **and** vibrato are baked in) → `prior_mel/` **and** `prior_wav/<id>.wav`,
+  `onsets/` + `offsets/`
   + `cond/{articulation,vibrato}/` via the schema rasterizers (the rasterizers see
   only the `vibrato` bool — `vib_params` affects the prior audio, never the cond tracks;
   per-note dynamics ride in the prior via `env_dct`, so there is no velocity cond track).
@@ -225,6 +227,18 @@ at playhead, `g` mute-region paint on ruler. Wheel pans time; ctrl+wheel zooms (
   technique/vibrato/env_dct/vib_params/vib_model`, times rounded 1e-6 and coefficients 1e-4)
   + mute regions (`start_s/end_s`) — so re-running either measurement pass invalidates the
   affected clips and nothing else.
+  - **`prior_wav/<id>.wav`** is the float prior written straight to disk (mono PCM16 @ 44.1 kHz,
+    `n_samples` long, sample-aligned with `gt/`) — *the same signal* `prior_mel` was melled from,
+    so a consumer can re-mel the pair from audio. Its only consumer today is Arioso's pitch-shift
+    augmentation (`Arioso.pitch_aug`, which needs waveforms rather than mels). A **peak assert**
+    guards the write: PCM16 clamps silently past ±1.0, which would leave `prior_wav` a *different*
+    signal from the float `prior_mel` came from, so `peak > 1.0` is a loud `AssertionError` naming
+    the clip rather than a quiet mismatch.
+  - **One-time full recompile.** `prior_wav` is the newest entry in `_artifact_paths`, so every
+    clip compiled before it existed fails `_artifacts_exist` and rebuilds — deliberately. The
+    provenance triple is **unchanged** (nothing about *what* is rendered moved), so no
+    `compile_hash` bump was needed: the next run silently rebuilds the whole corpus once and is
+    incremental again forever after. Already done for `gt_arky` (all 37 clips).
   - **Auto split update.** Every run (full or partial) ends in `update_root_split(root)` →
     `Arioso.splits.update_split`, which additively reconciles `<root>/split.json` with the new
     manifest (new clips assigned by piece, vanished ones pruned, existing train/val assignments
@@ -244,7 +258,7 @@ at playhead, `g` mute-region paint on ruler. Wheel pans time; ctrl+wheel zooms (
   (404 clip_not_found / no_notes / not_processed, 409 job_running) — they run in the request
   thread rather than through `JobManager` because they are read-then-write-notes, not
   pipeline stages.
-- **`tests/`** — 55 pytest cases, GPU/network-free: velocity mapping, vibrato synthetic FM
+- **`tests/`** — 60 pytest cases, GPU/network-free: velocity mapping, vibrato synthetic FM
   (true/flat/drift/short), notes_store rev-conflict + merge semantics, MIDI round-trip
   through `note_groups_from_midi`, align sign convention on synthetic click tracks,
   `test_vibrato_fit` (synthetic rampboth5 round-trip incl. NaN/octave-spike robustness and

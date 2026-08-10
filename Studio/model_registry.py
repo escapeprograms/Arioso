@@ -9,9 +9,11 @@ but only **inside** function bodies (imports at call time), so merely importing 
     ``cfg_from_dict(ckpt["cfg"])`` -> ``AriosoModel(cfg)`` ->
     ``load_state_dict(ckpt["ema"])`` -> ``eval``), keyed by ``(run, checkpoint,
     device)`` behind a lock so the first render pays the load and the rest reuse it.
-  * ``get_vocoder(device)`` — the frozen BigVGAN-v2 vocoder
-    (:func:`common.vocoder.load_vocoder`), one per device. Weights download from HF
-    on first use (a one-time cost the render pipeline reports as its own stage).
+  * ``get_vocoder(device, checkpoint_dir)`` — the frozen BigVGAN-v2 vocoder
+    (:func:`common.vocoder.load_vocoder`), keyed by ``(checkpoint_dir, device)`` so a
+    render can pick a fine-tuned generator per call and each stays loaded. Stock-HF
+    weights download from the HF Hub on first use (a one-time cost the render
+    pipeline reports as its own stage).
 
 Both mirror :func:`Labeler.transcribe.get_model`'s double-checked-locking singleton
 pattern. ``list_models`` is a thin pass-through to :func:`Studio.library.scan_models`
@@ -30,7 +32,7 @@ from .library import scan_models
 _MODEL_CACHE: dict[tuple, "LoadedModel"] = {}
 _MODEL_LOCK = threading.Lock()
 
-_VOC_CACHE: dict[str, object] = {}
+_VOC_CACHE: dict[tuple, object] = {}
 _VOC_LOCK = threading.Lock()
 
 
@@ -101,22 +103,28 @@ def get_model(models_root: str, run: str, checkpoint: str,
         return loaded
 
 
-def get_vocoder(device: str | None = None):
-    """Load (once) and return the frozen BigVGAN-v2 vocoder on ``device``.
+def get_vocoder(device: str | None = None, checkpoint_dir: str | None = None):
+    """Load (once) and return a frozen BigVGAN-v2 vocoder on ``device``.
 
-    Thread-safe singleton per device. Downloads weights from the HF Hub on first
-    call (cached thereafter); the loader falls back to the PyTorch-native path when
-    the fused CUDA kernel can't build (it can't in this environment).
+    Thread-safe singleton keyed by ``(checkpoint_dir, device)``, so a project
+    rendering with a fine-tuned generator and one on the stock baseline can both
+    stay resident. ``checkpoint_dir`` is passed straight to
+    :func:`common.vocoder.load_vocoder`: ``None`` takes that loader's default
+    (``common.config.VOCODER_DIR``), ``"hf"`` forces the stock HF checkpoint, and
+    anything else is a local run dir. Stock weights download from the HF Hub on
+    first call (cached thereafter); the loader falls back to the PyTorch-native
+    path when the fused CUDA kernel can't build (it can't in this environment).
     """
     device = _pick_device(device)
-    cached = _VOC_CACHE.get(device)
+    key = (checkpoint_dir, device)
+    cached = _VOC_CACHE.get(key)
     if cached is not None:
         return cached
     with _VOC_LOCK:
-        cached = _VOC_CACHE.get(device)
+        cached = _VOC_CACHE.get(key)
         if cached is not None:
             return cached
         from common.vocoder import load_vocoder
-        voc = load_vocoder(device=device)
-        _VOC_CACHE[device] = voc
+        voc = load_vocoder(device=device, checkpoint_dir=checkpoint_dir)
+        _VOC_CACHE[key] = voc
         return voc

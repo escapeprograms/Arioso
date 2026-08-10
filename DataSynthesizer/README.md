@@ -85,6 +85,7 @@ Pass 1  build_dataset (per clip):
 Pass 2  build_prior (per ok row of manifest.csv):
    └ common.prior.quantized_prior() (shaped additive saw + masked-RMS -> TARGET_RMS_DBFS)
         + reuse manifest offset_ms shift + mel ─────────────> data/prior_mel/<base>.npy
+        │                              └ same signal as wav ─> data/prior_wav/<base>.wav
         + aligned onset frames ─────────────────────────────> data/onsets/<base>.npy
 
 Export  export_manifest:  manifest.csv (ok rows) ────────────> data/manifest.json  (schema v1)
@@ -103,7 +104,7 @@ the dataset-root standard all live in the **top-level `common/` package** — se
 `from common.audio_io import load_mono, write_pcm16, voiced_rms_normalize`,
 `from common.vocoder import mel_frames`, `from common.prior import quantized_prior, note_onsets`,
 `from common.onset_align import estimate_offset_seconds, shift_samples`,
-`from common.dataset_schema import DIR_PRIOR_MEL, DIR_ONSETS, write_manifest`, and
+`from common.dataset_schema import DIR_PRIOR_MEL, DIR_PRIOR_WAV, DIR_ONSETS, write_manifest`, and
 `from common.config import SR, TARGET_RMS_DBFS`.
 
 ### config.py — pipeline-specific constants (+ re-exported SR/HOP)
@@ -143,10 +144,25 @@ knobs are gone entirely.)
 - `build(...)` / `process_clip(row, out_dir, dataset_root, ...)` — pass over `manifest.csv`
   (status==ok): assemble the spec-faithful prior via `common.prior.quantized_prior` (shaped
   additive saw + masked-RMS to `TARGET_RMS_DBFS`), shift by the manifest `offset_ms`, mel it via
-  `common.vocoder.mel_frames` → `data/prior_mel/<base>.npy` (dir name `DIR_PRIOR_MEL`), and write
+  `common.vocoder.mel_frames` → `data/prior_mel/<base>.npy` (dir name `DIR_PRIOR_MEL`), write that
+  same buffer as audio → `data/prior_wav/<base>.wav` (`DIR_PRIOR_WAV`), and write
   aligned onset frames → `data/onsets/<base>.npy` (`DIR_ONSETS`). Reuses the manifest offset (no
-  re-estimation); resumable + skip-existing. CLI flags `--source` / `--harmonic-law` / `--alpha` /
-  `--corner-nc` / `--corner-p` / `--envelope` / `--level-match` for ablations.
+  re-estimation); resumable + skip-existing (all three outputs must be present). CLI flags
+  `--source` / `--harmonic-law` / `--alpha` / `--corner-nc` / `--corner-p` / `--envelope` /
+  `--level-match` for ablations.
+- **`prior_wav/` — the rendered prior as audio.** The **post-shift** buffer only: the pre-shift
+  render is in score time, so writing that would hand consumers a wav silently misaligned with
+  `gt/` and `prior_mel/`. It is the same signal the mel is computed from, mono PCM16 @ `SR`, so a
+  consumer can re-mel the prior/target pair from audio — the one consumer today is Arioso's
+  pitch-shift augmentation (`Arioso.pitch_aug`). Guarded by a **peak assert**: PCM16 clamps
+  silently past ±1.0, which would make the wav a different signal from the float the mel came
+  from, so `peak > 1.0` raises rather than quietly diverging.
+- **The synthetic root needs no regeneration.** `prior_wav/` is optional in the dataset-root
+  contract and a root lacking it is simply never augmented (`Arioso.pitch_aug.wavs_available` is
+  the graceful-fallback gate), so the existing `Data/` root stays fully trainable as-is — it has
+  **not** been backfilled. Backfilling is just a plain re-run of `build_prior`: the skip check
+  fires only when *all three* outputs exist, so every clip missing `prior_wav` re-renders (no
+  `--overwrite` needed) — a full ~888-clip pass, which is why it has not been spent.
 - CLI: `python -m DataSynthesizer.build_prior --limit 4` (smoke) | `python -m DataSynthesizer.build_prior` (full).
 
 ### export_manifest.py — build log → standard `manifest.json`

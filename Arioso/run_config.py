@@ -68,6 +68,7 @@ class RunSettings:
     wandb: bool = True
     name: str | None = None        # W&B run name; None -> auto_run_name(cfg)
     resume: bool = False           # load latest step ckpt from this run's folder; optimizer state not restored
+    num_workers: int = 0           # dataloader workers for the TRAIN loader (hide pitch-aug CPU cost; val loader always 0)
 
 
 # --- YAML -> dataclass loading ---------------------------------------------------

@@ -39,7 +39,7 @@ import os
 import numpy as np
 import soundfile as sf
 
-from common.config import DEFAULT_PEAK, SR, VOCODER_DIR
+from common.config import DEFAULT_PEAK, SR
 
 from .config import SCHEMA_VERSION
 from .timing import beats_to_seconds
@@ -152,34 +152,40 @@ def _canon_vibrato(vib) -> dict:
             "onset_beats": round(float(v.get("onset_beats", 0.0)), 6)}
 
 
-def _vocoder_cache_id() -> str | None:
-    """Identity of the active vocoder for cache keying, or None for the HF stock.
+def _vocoder_cache_id(checkpoint_dir: str | None) -> str | None:
+    """Identity of a vocoder for cache keying, or None for the HF stock baseline.
 
-    ``common.config.VOCODER_DIR`` selects a local fine-tuned generator; its audio
-    genuinely differs from the stock checkpoint, so it must invalidate cached
-    segments. Returns ``"<dirname>:<generator size>"`` (size catches re-exported
-    weights under the same name), or None when the stock HF vocoder is active.
+    ``checkpoint_dir`` is the loader-facing selection (:func:`common.vocoder.load_vocoder`'s
+    argument, produced by :func:`Studio.library.vocoder_checkpoint_dir`): a local
+    fine-tuned generator dir, or ``None`` / ``"hf"`` for the stock checkpoint. A
+    local generator's audio genuinely differs from the stock one, so it must
+    invalidate cached segments: it returns ``"<dirname>:<generator size>"`` (the
+    size catches re-exported weights under the same name). The stock baseline has
+    no id — see :func:`segment_hash` for why that keeps historical hashes intact.
     """
-    if not VOCODER_DIR:
+    if not checkpoint_dir or checkpoint_dir == "hf":
         return None
-    gen = os.path.join(VOCODER_DIR, "bigvgan_generator.pt")
+    gen = os.path.join(checkpoint_dir, "bigvgan_generator.pt")
     size = os.path.getsize(gen) if os.path.isfile(gen) else 0
-    return f"{os.path.basename(os.path.normpath(VOCODER_DIR))}:{size}"
+    return f"{os.path.basename(os.path.normpath(checkpoint_dir))}:{size}"
 
 
 def segment_hash(segment_notes_: list[dict], bpm: float, time_sig: dict,
                  model: str, checkpoint: str, prior_mode: str,
-                 schema_version: int, knobs: dict) -> str:
+                 schema_version: int, knobs: dict,
+                 vocoder: str | None = None) -> str:
     """SHA1 hex over a segment's canonical content + render params.
 
     Note beat positions are made **segment-relative** (each ``start_beat`` minus the
     segment's earliest onset) so an unchanged phrase moved in time keeps its hash.
     Notes are sorted deterministically; floats rounded to 6 dp to kill FP noise.
     Params folded in: ``bpm``, ``time_sig``, ``model``, ``checkpoint``,
-    ``prior_mode``, ``schema_version``, the cache ``knobs`` (gap/pad) and — when a
-    local fine-tuned vocoder is active (``common.config.VOCODER_DIR``) — the
-    vocoder identity, so any of them changing invalidates every segment
-    (expected — e.g. a BPM change or a vocoder swap).
+    ``prior_mode``, ``schema_version``, the cache ``knobs`` (gap/pad) and — when
+    the render uses a local fine-tuned vocoder — ``vocoder``, so any of them
+    changing invalidates every segment (expected — e.g. a BPM change or a vocoder
+    swap). ``vocoder`` is a **precomputed cache id** (:func:`_vocoder_cache_id`),
+    not a Studio vocoder name; ``None`` omits the key entirely, which is the stock
+    HF baseline (and the historical, pre-vocoder-selection payload).
 
     Per-note fields hashed: ``pitch``, ``start_beat`` (segment-relative),
     ``len_beats``, ``velocity``, ``technique``, ``bend``, ``vibrato``, ``pan`` and —
@@ -229,10 +235,10 @@ def segment_hash(segment_notes_: list[dict], bpm: float, time_sig: dict,
     }
     # Conditional "vocoder" key (same pattern as per-note "env"): only a local
     # fine-tuned vocoder adds it, so stock-vocoder hashes stay byte-identical to
-    # historical ones (and revive their caches if config.VOCODER_DIR reverts to
-    # None). A fine-tuned vocoder intentionally re-hashes every segment — all
+    # historical ones (and revive their caches whenever a render selects "hf"
+    # again). A fine-tuned vocoder intentionally re-hashes every segment — all
     # cached audio predating it is stale.
-    voc = _vocoder_cache_id()
+    voc = vocoder
     if voc is not None:
         payload["vocoder"] = voc
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -242,7 +248,7 @@ def segment_hash(segment_notes_: list[dict], bpm: float, time_sig: dict,
 # --- planning ---------------------------------------------------------------
 
 def plan_render(doc: dict, cfg, model: str, checkpoint: str, prior_mode: str,
-                cache_dir: str | None = None) -> dict:
+                vocoder: str | None = None, cache_dir: str | None = None) -> dict:
     """Plan a render: segment ``doc``, hash each segment, mark cache hits.
 
     Returns ``{"segments": [...], "cache_dir": str, "total_duration_s": float}``
@@ -250,11 +256,20 @@ def plan_render(doc: dict, cfg, model: str, checkpoint: str, prior_mode: str,
     pad_tail, start_beat, end_beat, notes}``. ``cached`` is whether
     ``render/cache/seg_<hash>.wav`` already exists. ``cache_dir`` defaults to the
     project's ``render/cache/`` (derived from ``cfg`` + ``doc['project_id']``).
+
+    ``vocoder`` is a Studio vocoder **name** (a dir under ``vocoders_root``, or
+    ``"hf"``), defaulting to ``cfg.default_vocoder``; it is resolved to its cache
+    id once here and folded into every segment hash, so switching vocoders
+    invalidates the whole cache (and switching back revives it).
     """
     bpm = float(doc["bpm"])
     time_sig = doc.get("time_sig") or {"num": 4, "den": 4}
     schema_version = int(doc.get("schema_version", SCHEMA_VERSION))
     knobs = {"gap_s": cfg.cache.gap_s, "pad_s": cfg.cache.pad_s}
+    # Lazy (like render_cache_dir below): library imports config, not the reverse.
+    from .library import vocoder_checkpoint_dir
+    voc_id = _vocoder_cache_id(
+        vocoder_checkpoint_dir(cfg, vocoder or cfg.default_vocoder))
     if cache_dir is None:
         from .library import render_cache_dir
         cache_dir = render_cache_dir(cfg, doc["project_id"])
@@ -263,7 +278,7 @@ def plan_render(doc: dict, cfg, model: str, checkpoint: str, prior_mode: str,
     entries: list[dict] = []
     for seg in segs:
         h = segment_hash(seg["notes"], bpm, time_sig, model, checkpoint,
-                         prior_mode, schema_version, knobs)
+                         prior_mode, schema_version, knobs, vocoder=voc_id)
         wav = seg_wav_name(h)
         start_beat = min(float(n["start_beat"]) for n in seg["notes"])
         end_beat = max(float(n["start_beat"]) + float(n["len_beats"])

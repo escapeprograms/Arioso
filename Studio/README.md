@@ -23,10 +23,12 @@ KMP_DUPLICATE_LIB_OK=TRUE "$PY" -m Studio.server   # → http://127.0.0.1:8766  
   `index.html` over `file://`) runs the whole editor against an in-browser fake backend
   (`js/mock.js`, localStorage) — seeded demo phrase, simulated render with a synthesized
   waveform/peaks. Ideal for frontend work.
-- **First real render** downloads the **BigVGAN-v2** vocoder weights from HuggingFace
-  (`nvidia/bigvgan_v2_44khz_128band_512x`) — a one-time network cost surfaced as the
-  `vocoder` job stage; subsequent renders use the HF cache. `KMP_DUPLICATE_LIB_OK=TRUE` is
-  needed for the torch/numba OpenMP clash on this machine.
+- **Vocoder weights**: the default vocoder is the local violin fine-tune
+  (`Vocoder/models/ft_v2`, via `common.config.VOCODER_DIR`), so a normal first render loads
+  from disk. Picking **`stock (HF)`** in the DEV drawer downloads the pretrained **BigVGAN-v2**
+  weights from HuggingFace (`nvidia/bigvgan_v2_44khz_128band_512x`) — a one-time network cost
+  surfaced as the `vocoder` job stage; later renders use the HF cache.
+  `KMP_DUPLICATE_LIB_OK=TRUE` is needed for the torch/numba OpenMP clash on this machine.
 
 ## Status — all phases DONE (Phases 0–7)
 
@@ -92,18 +94,25 @@ The projects root is the directory `/media` is served over, so a project's rende
 ## API (localhost JSON; errors `{error, detail}`)
 
 `GET /api/config` (sr/hop/frame_rate, articulations + colors + keys + model-vocab map, snap
-options, prior modes, default model/checkpoint/prior_mode) · `GET /api/models` (filesystem
-scan of `models_root/<run>/*.pt` → `[{run, checkpoints, default}]`, `7-9-adr` flagged default;
+options, prior modes, default model/checkpoint/**vocoder**/prior_mode) · `GET /api/models`
+(filesystem scan of `models_root/<run>/*.pt` → `[{run, checkpoints, default}]`, `7-9-adr`
+flagged default, plus `vocoders: [{name, default}]` — the scan of `vocoders_root/<name>/`
+dirs holding `config.json` + `bigvgan_generator.pt`, with the dir-less `{"name":"hf"}` stock
+baseline appended — and `default_model`/`default_checkpoint`/`default_vocoder`;
 **no torch**) · `GET /api/projects` (summaries) · `POST /api/projects {name}` → **201** (fresh
 doc) · `GET /api/projects/{id}` (404 unknown) · `PUT|POST /api/projects/{id}` (full doc; POST
 is the sendBeacon alias; **409 `rev_conflict`** carrying `server_rev` on stale rev) ·
 `POST /api/projects/{id}/render` `{scope "phrase"|"selection", note_ids?, model?, checkpoint?,
-prior_mode?}` → **202 `accepted`** (job on a `JobManager` thread) / **409 `job_running`** /
-**400** (bad scope/prior_mode, `model_not_found` on a missing checkpoint) ·
+prior_mode?, vocoder?}` → **202 `accepted`** (job on a `JobManager` thread, echoing the
+resolved `model`/`checkpoint`/`prior_mode`/`vocoder`) / **409 `job_running`** /
+**400** (bad scope/prior_mode, `model_not_found` on a missing checkpoint,
+**`vocoder_not_found`** on a name that is neither `"hf"` nor a loadable dir under
+`vocoders_root` — names containing `/`, `\` or `..` are rejected outright, so a request can
+never load weights outside that root) ·
 `GET /api/projects/{id}/render/status` (live job status or `{state:"idle"}`; while running
 also carries `segments_done`/`segments_total`) ·
 `GET /api/projects/{id}/render/meta` → `render/meta.json`
-(`{wav, peaks, duration_s, model, checkpoint, prior_mode, scope, note_ids, device,
+(`{wav, peaks, duration_s, model, checkpoint, prior_mode, vocoder, scope, note_ids, device,
 segments[{hash, start_beat, end_beat, start_s, end_s, cached}], segments_total,
 segments_rendered, segments_cached, segments_touched, warnings}`) or **404 `not_rendered`**. `/media/<id>/…` is a StaticFiles mount (wav Range/206 for free), so
 the render's `mix.wav`/`mix.peaks` are reachable at `/media/<id>/render/…`. `/` **redirects to
@@ -132,22 +141,34 @@ render thread would race those saves and bump the rev. Meta is a separate server
 - **`__init__.py`** — package marker; run modules from the project root. Notes the torch-free
   import contract.
 - **`studio.yaml`** — user config: `projects_root`, `port` (8766, distinct from Labeler's 8765),
-  `models_root`, `default_model`/`default_checkpoint`/`default_prior_mode`, the articulation
+  `models_root`, `vocoders_root` (`Vocoder/models`),
+  `default_model`/`default_checkpoint`/`default_vocoder`/`default_prior_mode`, the articulation
   vocabulary `[{name,key,color,abbrev,model_vocab}]` (normal/slur/spiccato/detache on keys 1–4,
   normal = FL green `#6cc04a`), and the `cache` group (`gap_s` 0.35, `pad_s` 0.1). Partial
-  override of code defaults; unknown key = hard error.
+  override of code defaults; unknown key = hard error. The model/vocoder default keys ship
+  **commented out** — they are derived from `common/config.py` (see below), so uncomment only to
+  pin Studio to something other than the project default.
 - **`config.py`** — `StudioConfig` dataclass tree + `load_config` YAML loader (unknown key =
   hard error listing valid keys, mirroring `Labeler/config.py`). Owns `SCHEMA_VERSION`,
   `FRAME_RATE` (SR/HOP ≈ 86.13), `PRIOR_MODES` (`bend`/`quantized`), `SNAP_OPTIONS`, the
   `Articulation`/`CacheParams` dataclasses, and derived helpers (`vocabulary_snapshot`,
   `technique_model_vocab` stub table, `snap_options`, `default_technique`). Re-exports `SR`/`HOP`
-  from `common.config`. **Torch-free.**
+  from `common.config` — and **derives its model/vocoder defaults from there** rather than
+  hardcoding them: `default_model`/`default_checkpoint` are the run-dir and file basenames of
+  `common.config.ACOUSTIC_CKPT`, `default_vocoder` is `basename(VOCODER_DIR)` (`"hf"` when that
+  is `None`). Promoting a checkpoint project-wide is therefore a one-line edit in
+  `common/config.py`. **Torch-free.**
 - **`library.py`** — lowest-level filesystem module: per-project path helpers (`project_dir`,
   `project_file`, `render_dir`, `render_status_file`, `exports_dir`, `backup_dir`), filename
   constants (`PROJECT_JSON`, `RENDER_DIR`, `MIX_WAV`, …), `sanitize_project_id` /
   `unique_project_id` (collision `-N` suffix), `scan_project_ids` / `project_exists` /
   `require_project` (`ProjectNotFound`), atomic `read_json` / `atomic_write_json` (`.tmp` +
-  `os.replace`), and **`scan_models`** (pure filesystem `<run>/*.pt` scan for `/api/models`).
+  `os.replace`), **`scan_models`** (pure filesystem `<run>/*.pt` scan for `/api/models`) and the
+  matching vocoder trio: `vocoders_root(cfg)`, **`scan_vocoders`** (dirs under it holding *both*
+  `config.json` and `bigvgan_generator.pt`, so the UI never offers a vocoder that would fail at
+  load; the dir-less `"hf"` sentinel is appended by the API, not the scan) and
+  `vocoder_checkpoint_dir(cfg, name)` mapping a Studio vocoder name onto
+  `common.vocoder.load_vocoder`'s `checkpoint_dir` (`"hf"` passes straight through).
 - **`timing.py`** — pure beats↔seconds authority + bar/beat + snap math, **no torch**. One
   beat = one quarter note (matches quarter-note BPM and `ppq`). `beats_to_seconds` /
   `seconds_to_beats`; `quarters_per_beat` (`4/den`) / `quarters_per_bar` (`num·4/den`);
@@ -171,7 +192,9 @@ render thread would race those saves and bump the rev. Meta is a separate server
   `/api/config`. `main()`: uvicorn 127.0.0.1:8766, single process, **no reload**. **Torch-free.**
 - **`api.py`** — thin `APIRouter` with uniform `_err(status, code, detail, **extra)`; reads
   `cfg`/`jobs` from `request.app.state`. Endpoints per the API section above; the render POST
-  validates scope/prior_mode/checkpoint then `jobs.submit`s `render.run_render` (`from .render
+  validates scope/prior_mode/checkpoint and the requested vocoder (name traversal rejected, then
+  the dir must hold `config.json` + `bigvgan_generator.pt`) then `jobs.submit`s
+  `render.run_render` (`from .render
   import run_render` is done **inside** the handler so the api import stays torch-free);
   render/status reads `JobManager`, render/meta reads `render/meta.json`. **Torch-free.**
 
@@ -202,16 +225,23 @@ render thread would race those saves and bump the rev. Meta is a separate server
   double-checked-locking singleton keyed `(run, checkpoint, device)` → `LoadedModel(model, cfg,
   device)` loaded the `Arioso.infer.main` way (`torch.load` map_location → `cfg_from_dict` →
   `AriosoModel` → `load_state_dict(ema||model)` → eval); `ModelNotFound` on a missing ckpt.
-  `get_vocoder(device)`: per-device BigVGAN singleton (`common.vocoder.load_vocoder`, HF
-  download first call, native-GPU fallback). `list_models` = `library.scan_models` pass-through.
+  `get_vocoder(device=None, checkpoint_dir=None)`: BigVGAN singleton
+  (`common.vocoder.load_vocoder`, HF download first call, native-GPU fallback) keyed
+  `(checkpoint_dir, device)` — **not per-device only** — so a project rendering through a
+  fine-tuned generator and one on the stock baseline can both stay resident.
+  `list_models` = `library.scan_models` pass-through.
 - **`render.py`** — `run_render(cfg, doc, project_dir, *, scope, note_ids, model, checkpoint,
-  prior_mode, device, progress)`: **segment-aware**. `plan_render` (torch-free) segments +
+  prior_mode, vocoder, device, progress)`: **segment-aware**. `plan_render` (torch-free) segments +
   hashes the doc and detects cache hits, then only the non-cached segments run the five-stage
   pipeline (`_render_segments`, module-level so it can be monkeypatched out in tests):
   per-segment `write_midi` (notes time-shifted so the padded lead = t 0) →
   `common.prior.quantized_prior(pitch=bend|quantized)` +
   `common.vocoder.mel_frames(synth.render(total_samples=span))` →
-  `generate_mel(cond_frames=None)` → `vocode` → `write_pcm16(cache/seg_<hash>.wav)`. Then
+  `generate_mel(cond_frames=None)` → `vocode` → `write_pcm16(cache/seg_<hash>.wav)`.
+  `model`/`checkpoint`/`prior_mode`/`vocoder` all default to the `cfg` defaults; `vocoder` is a
+  **name** (a dir under `cfg.vocoders_root`, or `"hf"`), resolved to the loader's
+  `checkpoint_dir` via `library.vocoder_checkpoint_dir` in `_render_segments` and folded into
+  every segment hash — so swapping it re-renders the whole project. Then
   `cache.stitch` places every segment (cached + fresh) into `mix.wav`, `write_peaks(mix.peaks)`,
   `prune_cache`, and writes `render/meta.json` with the segment manifest. Module-level
   `GPU_LOCK` serializes the two GPU forwards across projects; all torch imports are **inside**
@@ -228,9 +258,18 @@ render thread would race those saves and bump the rev. Meta is a separate server
   each padded into the adjacent silence (internal boundaries split the gap in half so pads
   never cross; first lead clamped to `[0, start_s]`; last tail = full `pad_s`).
   `segment_hash(...)`: SHA1 over canonical JSON of the notes' content
-  (`pitch/start_beat/len_beats/velocity/technique/bend/vibrato/pan`, beats made
+  (`pitch/start_beat/len_beats/velocity/technique/bend/vibrato/pan`, plus `env` — the
+  `[c0,c1,c2]` energy envelope — **conditionally**, only for notes that carry an `env_dct`, so
+  env-less projects keep their historical hashes; beats made
   **segment-relative** so a whole phrase can move in time and still hit cache) + params
-  (`bpm/time_sig/model/checkpoint/prior_mode/schema_version/gap_s/pad_s`). `plan_render(...)` →
+  (`bpm/time_sig/model/checkpoint/prior_mode/schema_version/gap_s/pad_s`) + a **conditional
+  `vocoder`** key. The vocoder identity is a precomputed cache id (`_vocoder_cache_id`):
+  `"<dirname>:<generator file size>"` for a local fine-tune (the size catches a re-export under
+  the same name), and **omitted entirely** for the stock `"hf"` baseline — same trick as `env`,
+  so stock-vocoder hashes stay byte-identical to the pre-selection ones and selecting `hf` again
+  revives those caches, while switching to a fine-tuned generator intentionally invalidates
+  everything. `plan_render(...)` takes the vocoder **name** (default `cfg.default_vocoder`),
+  resolves it to that id once, and returns →
   `{segments[{hash, wav, cached, start_s, end_s, pad_lead, pad_tail, start_beat, end_beat,
   notes}], cache_dir, total_duration_s}`. `stitch(segments, cache_dir, total_duration_s, sr)`:
   places each cache WAV at `start_s - pad_lead`, linear crossfade on any pad overlap, zeros in
@@ -255,13 +294,16 @@ render thread would race those saves and bump the rev. Meta is a separate server
   (beats are tempo-invariant, so it does not change them).
 - **`export.py`** — `export_midi(cfg, doc, project_dir)` → `write_midi` (`prior_mode="bend"`
   always) to `exports/<stem>.mid` → `{kind, path, warnings}`. `export_wav(cfg, doc, project_dir)`
-  never re-renders: it re-plans the doc with the existing `render/meta.json` params and, if every
+  never re-renders: it re-plans the doc with the existing `render/meta.json` params — including
+  that render's **own** `vocoder` (a legacy meta predating the key falls back to
+  `cfg.default_vocoder`, which is exactly what such a render used), or a non-default-vocoder
+  render would hash differently and look spuriously stale — and, if every
   planned segment hash matches the manifest, its cache WAV exists, and `mix.wav` exists, copies
   `mix.wav` to `exports/<stem>.wav`; otherwise raises `RenderStale` (→ 409, the client renders
   first). `<stem>` = sanitized name + `-YYYYmmdd-HHMMSS`. **Torch-free** (cache bookkeeping +
   file copy — no model/vocoder).
 
-- **`tests/`** — 106 pytest cases, GPU/network/torch-free: `test_timing`,
+- **`tests/`** — 157 pytest cases, GPU/network/torch-free: `test_timing`,
   `test_project_store` (build defaults incl. **pan carry/clamp**, rev-conflict, backups),
   `test_api` (config/models/CRUD/rev-conflict + render validation 400s and
   render/meta 404), `test_voices` (overlap/chord/legato/determinism/overflow), `test_bend`
@@ -275,7 +317,9 @@ render thread would race those saves and bump the rev. Meta is a separate server
   (tempo-map beats via a mido tempo-change file, snap, pitch-bend/drum warnings, bad/empty midi),
   `test_export_api` (import replace/merge/adopt-bpm + bad-body/mode 400s; MIDI export written +
   served by `/media`; WAV export 409 when stale, success against a planted fresh render, stale
-  again after an edit).
+  again after an edit, freshness with a non-default/legacy-meta vocoder), `test_config`
+  (yaml overrides incl. the vocoder keys, defaults derived from `common.config`),
+  `test_library` (`scan_vocoders` filtering/sorting, `vocoder_checkpoint_dir` hf passthrough).
 
 ## Frontend additions (Phase 6, `static/`)
 
@@ -361,7 +405,7 @@ charcoal theme). All canvases are DPR-scaled. Modules:
   time-sig editing, bar:beat readout, master volume. BPM/time-sig write the doc via `markDirty`
   (so they invalidate a fresh render).
 - **`js/rendermgr.js`** (Phase 4) — render orchestration: Render button → POST (`selection` when
-  a selection exists, else `phrase`) with the DEV drawer's model/checkpoint/prior_mode, polls
+  a selection exists, else `phrase`) with the DEV drawer's model/checkpoint/vocoder/prior_mode, polls
   `render/status` every 500 ms → progress strip, on done loads peaks + decodes the wav and marks
   the render fresh. `onMutation` hook dims the lane + falls the live source back to synth.
   `renderAndWait()` powers the export-WAV auto-render. `onProjectLoaded` adopts any on-disk
@@ -369,9 +413,12 @@ charcoal theme). All canvases are DPR-scaled. Modules:
 - **`js/waveform.js`** (Phase 4) — the `#wave` lane: fetches/parses `mix.peaks` (`SPK1`), draws
   the filled FL envelope beat-aligned (seconds→beats via bpm, so it re-aligns on zoom/scroll/
   bpm-change), dimmed + "STALE — re-render" hint when `renderInfo.fresh` is false.
-- **`js/devopts.js`** (Phase 4) — the DEV drawer: model + checkpoint selectors (from
-  `/api/models`), bend/quantized prior toggle, readouts; selection persisted in localStorage and
-  read by `rendermgr` for the render POST body. Tolerant of the real + mock `/api/models` shapes.
+- **`js/devopts.js`** (Phase 4) — the DEV drawer: model + checkpoint + **vocoder** selectors
+  (all from `/api/models`; the vocoder dropdown lists every scanned `Vocoder/models/*` export
+  and shows `"hf"` as **`stock (HF)`**), bend/quantized prior toggle, readouts (the last-render
+  line reports `model/checkpoint · prior_mode · voc <name>`); selection persisted in localStorage
+  and read by `rendermgr` for the render POST body. Tolerant of the real + mock `/api/models`
+  shapes — a backend without a vocoder scan keeps the current selection selectable.
 - **`js/main.js`** — bootstrap: loads config/models/project (creates a default if none), wires
   every module **once** (no double-subscribe), the rAF draw loop with follow-playhead, autosave
   (`putProject`, 1.5 s debounce, 409 → reload-server-copy recovery), `beforeunload` sendBeacon

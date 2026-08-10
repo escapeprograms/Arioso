@@ -29,7 +29,7 @@ from .export import RenderStale, export_midi, export_wav
 from .jobs import idle_status
 from .library import (models_root, project_dir, project_exists, project_file,
                       read_json, render_meta_file, scan_models, scan_project_ids,
-                      unique_project_id)
+                      scan_vocoders, unique_project_id, vocoders_root)
 from .midi_import import BadMidi, import_midi
 
 router = APIRouter()
@@ -63,6 +63,7 @@ def get_config(request: Request):
         "prior_modes": list(PRIOR_MODES),
         "default_model": cfg.default_model,
         "default_checkpoint": cfg.default_checkpoint,
+        "default_vocoder": cfg.default_vocoder,
         "default_prior_mode": cfg.default_prior_mode,
     }
 
@@ -71,11 +72,16 @@ def get_config(request: Request):
 
 @router.get("/api/models")
 def get_models(request: Request):
+    # The stock HF baseline has no dir under vocoders_root, so it is appended to
+    # the scan as the "hf" sentinel — the render endpoint accepts it by name.
     cfg = _cfg(request)
     return {
         "models": scan_models(cfg),
         "default_model": cfg.default_model,
         "default_checkpoint": cfg.default_checkpoint,
+        "vocoders": scan_vocoders(cfg) + [
+            {"name": "hf", "default": cfg.default_vocoder == "hf"}],
+        "default_vocoder": cfg.default_vocoder,
     }
 
 
@@ -245,6 +251,20 @@ async def render_project(project_id: str, request: Request):
         return _err(400, "model_not_found",
                     f"checkpoint {model}/{checkpoint} does not exist")
 
+    # A vocoder is a plain dir name under vocoders_root (or the "hf" sentinel);
+    # reject separators/.. so a request can never load weights outside that root.
+    vocoder = body.get("vocoder") or cfg.default_vocoder
+    if not isinstance(vocoder, str) or any(bad in vocoder for bad in ("/", "\\", "..")):
+        return _err(400, "vocoder_not_found",
+                    f"vocoder {vocoder!r} is not a valid vocoder name")
+    if vocoder != "hf":
+        vdir = os.path.join(vocoders_root(cfg), vocoder)
+        if not (os.path.isfile(os.path.join(vdir, "config.json"))
+                and os.path.isfile(os.path.join(vdir, "bigvgan_generator.pt"))):
+            return _err(400, "vocoder_not_found",
+                        f"vocoder {vocoder} has no config.json + "
+                        f"bigvgan_generator.pt under {cfg.vocoders_root}")
+
     doc = project_store.load(cfg, project_id)
     if doc is None:
         return _err(404, "project_not_found", project_id)
@@ -255,7 +275,8 @@ async def render_project(project_id: str, request: Request):
 
     def work(progress):
         run_render(cfg, doc, pdir, scope=scope, note_ids=note_ids, model=model,
-                   checkpoint=checkpoint, prior_mode=prior_mode, progress=progress)
+                   checkpoint=checkpoint, prior_mode=prior_mode, vocoder=vocoder,
+                   progress=progress)
 
     initial = {"state": "processing", "stage": "serialize", "pct": 0,
                "message": "starting", "error": None}
@@ -263,7 +284,8 @@ async def render_project(project_id: str, request: Request):
         return _err(409, "job_running", "a render is already in progress for this project")
     return JSONResponse(
         {"status": "accepted", "project_id": project_id, "scope": scope,
-         "model": model, "checkpoint": checkpoint, "prior_mode": prior_mode},
+         "model": model, "checkpoint": checkpoint, "prior_mode": prior_mode,
+         "vocoder": vocoder},
         status_code=202)
 
 

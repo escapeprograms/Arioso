@@ -14,8 +14,8 @@ import soundfile as sf
 
 from common.audio_io import write_pcm16
 from common.config import DEFAULT_PEAK, SR
-from Studio.cache import (plan_render, prune_cache, seg_wav_name, segment_hash,
-                          segment_notes, stitch)
+from Studio.cache import (_vocoder_cache_id, plan_render, prune_cache,
+                          seg_wav_name, segment_hash, segment_notes, stitch)
 from Studio.config import load_config
 
 # 120 bpm -> 1 quarter-note beat = 0.5 s (keeps the seconds arithmetic obvious).
@@ -34,10 +34,12 @@ def _note(nid, start, length, pitch=67, velocity=100, technique="normal",
 
 def _hash(notes, **over):
     p = {"bpm": BPM, "time_sig": TIME_SIG, "model": "m", "checkpoint": "c",
-         "prior_mode": "bend", "schema_version": 1, "knobs": KNOBS}
+         "prior_mode": "bend", "schema_version": 1, "knobs": KNOBS,
+         "vocoder": None}
     p.update(over)
     return segment_hash(notes, p["bpm"], p["time_sig"], p["model"], p["checkpoint"],
-                        p["prior_mode"], p["schema_version"], p["knobs"])
+                        p["prior_mode"], p["schema_version"], p["knobs"],
+                        vocoder=p["vocoder"])
 
 
 # --- segmentation -----------------------------------------------------------
@@ -133,6 +135,73 @@ def test_expression_fields_change_hash():
     assert _hash(flat) != _hash(vib)
 
 
+# --- vocoder identity + its effect on the hash -------------------------------
+
+def _stub_vocoder_dir(root, name, nbytes):
+    """A loadable-looking BigVGAN run dir (config.json + sized generator weights)."""
+    d = root / name
+    d.mkdir(parents=True)
+    (d / "config.json").write_text("{}", encoding="utf-8")
+    (d / "bigvgan_generator.pt").write_bytes(b"\0" * nbytes)
+    return str(d)
+
+
+def test_vocoder_cache_id_stock_is_none():
+    # Both "no selection" and the explicit stock sentinel key as "no vocoder".
+    assert _vocoder_cache_id(None) is None
+    assert _vocoder_cache_id("hf") is None
+
+
+def test_vocoder_cache_id_local_dir_is_name_and_size(tmp_path):
+    d = _stub_vocoder_dir(tmp_path, "ft_v2", 123)
+    assert _vocoder_cache_id(d) == "ft_v2:123"
+    # A trailing separator must not change the identity (basename of the normpath).
+    assert _vocoder_cache_id(d + os.sep) == "ft_v2:123"
+
+
+def test_vocoder_cache_id_matches_the_module_global_era(tmp_path):
+    """Hash-compat: the config-default path still yields the historical id.
+
+    Before per-render selection the id came from ``common.config.VOCODER_DIR``
+    directly; now it is derived from ``cfg.default_vocoder`` -> ``vocoder_checkpoint_dir``.
+    Both must produce the same ``<name>:<size>`` string or every cached segment in
+    every existing project would go stale.
+    """
+    from common.config import VOCODER_DIR
+    from Studio.library import vocoder_checkpoint_dir
+
+    cfg = load_config()
+    old_style = _vocoder_cache_id(VOCODER_DIR)
+    new_style = _vocoder_cache_id(vocoder_checkpoint_dir(cfg, cfg.default_vocoder))
+    assert new_style == old_style
+
+
+def test_hash_without_vocoder_matches_historical_payload():
+    # vocoder=None omits the key entirely -> byte-identical to pre-selection hashes.
+    notes = [_note("n0", 0, 1)]
+    payload = {"notes": [{"pitch": 67, "start_beat": 0.0, "len_beats": 1.0,
+                          "velocity": 100, "technique": "normal", "bend": [],
+                          "vibrato": {"depth_semitones": 0.0, "rate_hz": 5.5,
+                                      "onset_beats": 0.15},
+                          "pan": 0.0}],
+               "bpm": 120.0, "time_sig": {"num": 4, "den": 4}, "model": "m",
+               "checkpoint": "c", "prior_mode": "bend", "schema_version": 1,
+               "knobs": {"gap_s": 0.35, "pad_s": 0.1}}
+    import hashlib
+    import json
+    expected = hashlib.sha1(json.dumps(payload, sort_keys=True,
+                                       separators=(",", ":")).encode("utf-8")).hexdigest()
+    assert _hash(notes) == expected
+    assert _hash(notes, vocoder=None) == expected
+
+
+def test_different_vocoder_ids_change_hash():
+    notes = [_note("n0", 0, 1)]
+    assert _hash(notes, vocoder="ft_v2:10") != _hash(notes, vocoder="ft_v3:10")
+    assert _hash(notes, vocoder="ft_v2:10") != _hash(notes, vocoder="ft_v2:11")
+    assert _hash(notes, vocoder="ft_v2:10") != _hash(notes, vocoder=None)
+
+
 # --- plan_render cache-hit detection ----------------------------------------
 
 def _doc(notes):
@@ -155,6 +224,36 @@ def test_plan_marks_cache_hits(tmp_path):
     plan2 = plan_render(doc, cfg, "m", "c", "bend", cache_dir=cache_dir)
     assert plan2["segments"][0]["cached"] is True
     assert plan2["segments"][1]["cached"] is False
+
+
+def test_plan_vocoder_selection_changes_hashes(tmp_path):
+    import dataclasses
+    vroot = tmp_path / "vocoders"
+    _stub_vocoder_dir(vroot, "A", 16)
+    _stub_vocoder_dir(vroot, "B", 32)
+    cfg = dataclasses.replace(load_config(), vocoders_root=str(vroot),
+                              default_vocoder="A")
+    doc = _doc([_note("n0", 0, 1)])
+    cache_dir = str(tmp_path / "cache")
+
+    a = plan_render(doc, cfg, "m", "c", "bend", vocoder="A", cache_dir=cache_dir)
+    b = plan_render(doc, cfg, "m", "c", "bend", vocoder="B", cache_dir=cache_dir)
+    assert a["segments"][0]["hash"] != b["segments"][0]["hash"]
+    # Omitting the arg falls back to cfg.default_vocoder.
+    dflt = plan_render(doc, cfg, "m", "c", "bend", cache_dir=cache_dir)
+    assert dflt["segments"][0]["hash"] == a["segments"][0]["hash"]
+
+
+def test_plan_hf_vocoder_hashes_like_no_vocoder_key(tmp_path):
+    import dataclasses
+    cfg = dataclasses.replace(load_config(), vocoders_root=str(tmp_path / "none"),
+                              default_vocoder="hf")
+    doc = _doc([_note("n0", 0, 1)])
+    plan = plan_render(doc, cfg, "m", "c", "bend", vocoder="hf",
+                       cache_dir=str(tmp_path))
+    assert plan["segments"][0]["hash"] == _hash(
+        doc["notes"], model="m", checkpoint="c", schema_version=1,
+        knobs={"gap_s": cfg.cache.gap_s, "pad_s": cfg.cache.pad_s}, vocoder=None)
 
 
 def test_plan_total_duration_covers_tail(tmp_path):

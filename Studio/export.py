@@ -73,16 +73,20 @@ def _render_is_fresh(cfg, doc: dict, project_id: str,
     """``(fresh, meta)``: is the on-disk render current for ``doc``?
 
     Fresh means a ``render/meta.json`` exists, replanning the doc with that render's
-    ``model``/``checkpoint``/``prior_mode`` yields exactly the manifest's segment
-    hashes (in order), every planned segment's cache WAV is present, and ``mix.wav``
-    exists. Any deviation (an edit changes a segment hash; a missing cache/mix file)
-    means stale.
+    ``model``/``checkpoint``/``prior_mode``/``vocoder`` yields exactly the manifest's
+    segment hashes (in order), every planned segment's cache WAV is present, and
+    ``mix.wav`` exists. Any deviation (an edit changes a segment hash; a missing
+    cache/mix file) means stale. Replanning must use the render's *own* vocoder or
+    a non-default-vocoder render would hash differently and look spuriously stale;
+    a legacy meta predating the key falls back to ``cfg.default_vocoder``, which is
+    exactly what such a render used.
     """
     meta = read_json(render_meta_file(cfg, project_id))
     if not meta:
         return False, None
     plan = plan_render(doc, cfg, meta.get("model"), meta.get("checkpoint"),
                        meta.get("prior_mode"),
+                       vocoder=meta.get("vocoder") or cfg.default_vocoder,
                        cache_dir=render_cache_dir(cfg, project_id))
     segs = plan["segments"]
     planned = [s["hash"] for s in segs]

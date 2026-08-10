@@ -97,6 +97,11 @@ score .mid ─ common.prior.quantized_prior().render (additive saw, corner ladde
     conditioning is swapped for the "unknown" id during training. `cond_dim` (property) = sum of the
     specs' `emb_dim` (0 when none). `__post_init__` also checks: spec names unique, each
     `emb_dim > 0` and `0 <= pad_id < num_classes`, `0 <= cond_dropout < 1`.
+  - **Pitch-shift augmentation knobs** (deferred toggle, OFF). `pitch_aug_p` (default **0.0** — the
+    fraction of TRAIN samples re-melled at a random shift; 0 = off) and `pitch_aug_cents` (default
+    **100.0** — the half-width of the uniform cents draw, i.e. ±1 semitone). They live on
+    `AriosoConfig` (the science half, embedded in checkpoints); `build_pitch_aug` reads them plus
+    `seed`. See **pitch_aug.py**.
   - **Checkpoint config (de)serialization.** `cfg_to_dict(cfg)` = `dataclasses.asdict` (CondSpec ->
     plain dict) so checkpoints stay **`torch.load(weights_only=True)`-safe** under torch 2.6 (no
     pickled dataclass instances). `cfg_from_dict(d)` filters `d` to current field names (ignoring
@@ -136,6 +141,17 @@ score .mid ─ common.prior.quantized_prior().render (additive saw, corner ladde
     `update_split` at the end of every run, so a compiled root's split always covers its manifest.
 - **dataset.py** — `AriosoDataset` (mmap mel slices), `LengthBucketBatchSampler`, `collate`
   (frame masks), `build_dataloader`.
+  - **Pitch-shift augmentation flow.** `AriosoDataset(roots, clips, specs=(), pitch_aug=None)` — a
+    `PitchAug` policy (from **pitch_aug.py**) replaces the memmap read of `x0`/`x1` with a re-mel
+    from `prior_wav/` + `gt/` for the drawn subset. The dataset carries an `epoch` token set by
+    `set_epoch(...)`, mirroring `LengthBucketBatchSampler.set_epoch` — `train.py` calls **both**
+    with the global step at the start of each pass over the pool, a unique per-epoch token, so the
+    shifts are redrawn every epoch. The order inside `__getitem__` is deliberate:
+    **draw first, check availability second**, so the RNG stream depends only on
+    `(seed, epoch, index)` and never on which roots happen to carry `prior_wav/`. `wavs_available`
+    is memoized per `(root.path, base)`. When the policy is `None` or inactive **no RNG is drawn
+    and no waveform is opened** — items are byte-identical to the pure-memmap path. Because the
+    shift is duration-preserving, `length` and every cond/boundary track are untouched.
   - **Multi-root + conditioning flow.** `AriosoDataset(roots, clips, specs=())` — a clip's `root`
     index selects its `DatasetRoot`, whose accessors give the prior/target mel paths. When `specs`
     is non-empty each item also carries `item["cond"][spec.name]`, a `[T]` int64 id track mmap-sliced
@@ -169,6 +185,37 @@ score .mid ─ common.prior.quantized_prior().render (additive saw, corner ladde
     direction is penalized toward the data anchor `v_adr = x1 - (1-sigma)*x_hat` — a masked, fp32,
     unit-vector squared error. `L = L_FM + adr_beta*L_ADR`. Two config keys: `adr_beta` (weight,
     0 = off) and `adr_p` (per-step gate, paper-faithful 1.0). Logged as `val/adr_loss` for all runs.
+- **pitch_aug.py** — **dataset-level** augmentation: on-the-fly pitch shift of the prior/target pair.
+  Arioso now has **two** augmentation seams and they never overlap. `augment.py` is **tensor / step
+  level** — post-batch transforms and auxiliary losses applied *inside the training step*, on tensors
+  already on the device, no disk access and no per-sample RNG stream. This module is **dataset
+  level** — applied *inside* `AriosoDataset.__getitem__`, before collation, working from the
+  **waveforms on disk** (`prior_wav/` + `gt/`) rather than the precomputed mels. Anything that
+  changes what a *sample is* (rather than how a batch is transformed) belongs here; future
+  dataset-level augmentations extend this module. CPU-pure numpy + soundfile, safe in dataloader
+  workers.
+  - `PitchAug(p, max_cents, seed)` — the frozen per-split policy; `.active` is `p > 0 and
+    max_cents > 0`, `.margin` is `common.keyshift.margin_frames(max_cents)`.
+    `cents_for(epoch, index)` returns the shift or `None`. Its generator is seeded from
+    `(seed, epoch, index)` and **nothing else** — not the worker id, not process RNG state — so
+    `num_workers` cannot change a single draw and a re-run of a config reproduces every shift. Draw
+    order is fixed (Bernoulli gate first, uniform cents only if it passes), so changing `max_cents`
+    never re-rolls *which* samples are augmented.
+  - `shifted_pair(root, base, start, end, cents, margin)` — both tracks through the identical path:
+    `slice_read_range` → a **ranged** `soundfile.read` (never `common.audio_io.load_mono`, which
+    would decode a whole recording for a 10 s clip) → `common.keyshift.mel_frames_keyshift` → drop
+    the margin context. A frame-count mismatch raises rather than pads (silent padding would desync
+    cond from mel). ~19 ms for a 10 s pair.
+  - `wavs_available(root, base)` — the graceful-fallback gate (both wavs present?). A root
+    predating `prior_wav/` — the synthetic `Data/` root — is simply never augmented instead of
+    failing the run.
+  - `build_pitch_aug(cfg, split_name)` — the single factory `build_dataloader` calls. Any split but
+    `"train"` gets a **structurally inactive** policy (`p=0.0`), so val can never be augmented no
+    matter what the config says: the val metric always scores the real mels.
+  - The shift itself is duration-preserving (`common/README.md` → `keyshift.py`), so the augmented
+    mels stay frame-for-frame aligned with the score-rasterized cond tracks and the clip's
+    `[start, end)` framing is untouched. Both tracks of a sample take the **same** shift, so the
+    prior→target relation the model learns is preserved.
 - **model/** — `timestep.py` (sinusoidal t_emb 256), `wavenet.py` (20 DiffSinger blocks, dilations
   `[1..512]x2`, gated act, skip-sum), `dit.py` (3 AdaLN-Zero **zero-init** + RoPE blocks, 6x64, FFN
   1536), `arioso.py`, `conditioning.py`.
@@ -205,6 +252,13 @@ score .mid ─ common.prior.quantized_prior().render (additive saw, corner ladde
     per-note velocities, `vibrato` from the per-note flag); boundary specs are `[T]` **int64**
     distance tracks — `onset_frames`/`offset_frames` (drop vs clamp, the training policy) through
     `Arioso.dataset.boundary_distances` (sentinel −1; must stay int64 — uint8 would corrupt it).
+  - **Checkpoint flags** — `--ckpt` is **optional**, defaulting to `common.config.ACOUSTIC_CKPT`
+    (the project-default Arioso checkpoint, currently `Arioso/models/7-9-adr/checkpoint_final.pt`);
+    pass it only to run a different one. **`--vocoder DIR|hf`** picks the BigVGAN checkpoint for
+    the listening render — a local generator dir, or `hf` for the stock pretrained baseline;
+    default is `common.config.VOCODER_DIR` (the violin fine-tune). `eval/copy_synthesis.py` takes
+    the same `--vocoder` flag. Both defaults live in `common/config.py`, so the CLI, the eval
+    scripts and Studio agree on one project default.
   - **--articulation** (`choices=ARTICULATIONS`, default `normal`) and **--vibrato /--no-vibrato**
     CLI args apply one constant per signal to every note (per-note control is a future extension).
     `main()` assembles `cond_frames` generically over `cfg.conditioning`; the deprecated `"technique"`
@@ -232,9 +286,11 @@ PY="C:/Users/archi/Miniconda3/envs/ai-violin/python.exe"   # the ai-violin env
 "$PY" -m Arioso.train --smoke                # short pipeline validation
 "$PY" -m Arioso.train                        # full run (~1e5 steps; tune to convergence)
 "$PY" -m Arioso.train --no-wandb             # ...same, without W&B logging
-"$PY" -m Arioso.infer score.mid --ckpt Arioso/models/checkpoint_final.pt   # -> Arioso/samples/
-"$PY" -m Arioso.infer score.mid --ckpt Arioso/models/checkpoint_final.pt --articulation spiccato --vibrato
-"$PY" -m Arioso.eval.metrics --ckpt Arioso/models/checkpoint_final.pt --plot delta.png
+"$PY" -m Arioso.infer score.mid               # -> Arioso/samples/ (project-default ckpt + vocoder)
+"$PY" -m Arioso.infer score.mid --ckpt Arioso/models/<run>/checkpoint_final.pt --articulation spiccato --vibrato
+"$PY" -m Arioso.infer score.mid --vocoder hf  # ...listen through the stock BigVGAN baseline
+"$PY" -m Arioso.eval.metrics --ckpt Arioso/models/<run>/checkpoint_final.pt --plot delta.png   # --ckpt required here
+"$PY" -m pytest Arioso/tests -q                  # unit tests (no GPU/network)
 ```
 
 ## Run configs (YAML)
@@ -248,6 +304,7 @@ never embedded) — plus an optional `config_version:`.
 "$PY" -m Arioso.train --config Arioso/configs/default.yaml        # loads to exactly the code defaults
 "$PY" -m Arioso.train --config Arioso/configs/conditioned_gt.yaml # multi-root + all 3 signals (unknown-filled synthetic)
 "$PY" -m Arioso.train --config Arioso/configs/unconditioned.yaml  # a partial-override ablation
+"$PY" -m Arioso.train --config Arioso/configs/8-8-pitch-aug.yaml  # gt_arky only + pitch-shift aug (p=0.5)
 "$PY" -m Arioso.train --config Arioso/configs/default.yaml --batch-size 2   # CLI overrides YAML
 "$PY" -m Arioso.train --data-root Data --data-root Data/datasets/gt_arky    # repeatable multi-root CLI
 "$PY" -m Arioso.train                                             # no --config -> exact old behavior
@@ -262,6 +319,24 @@ legacy single-root `run.out_dir: X` YAML key is accepted as an alias for `data_r
 `_RENAMED`). `configs/conditioned_gt.yaml` is the worked example: `data_roots: [Data,
 Data/datasets/gt_arky]` + `conditioning: [articulation, velocity, vibrato]`. Each run writes its
 fully-resolved config to `Arioso/models/config_<run-name>.yaml` (uploaded to W&B) for reproducibility.
+
+**Pitch-shift augmentation in YAML** — two `model:` keys plus one `run:` key:
+
+```yaml
+model:
+  pitch_aug_p: 0.5          # fraction of TRAIN samples re-melled at a random shift (0.0 = off, the default)
+  pitch_aug_cents: 100.0    # half-width of the uniform cents draw (default 100 = +/- 1 semitone)
+run:
+  num_workers: 4            # TRAIN-loader workers only; hides the pitch-aug STFT cost behind the GPU step
+```
+
+`num_workers` is a `RunSettings` field (runtime, never embedded in a checkpoint) and applies to the
+**train loader only** — `build_dataloader` is called without it for val, which stays at 0. It is
+safe to raise because the augmentation's RNG is seeded from `(seed, epoch, index)` alone, so worker
+count cannot change a draw; `persistent_workers` deliberately stays `False`, since a persistent
+worker would hold a stale dataset copy and never see `set_epoch`, freezing the shifts at epoch 0.
+`configs/8-8-pitch-aug.yaml` is the worked example (gt_arky alone, `p=0.5`, 4 workers), validated by
+`test notebooks/pitch_shift_validation.ipynb`.
 
 **Precedence:** smoke clamps > CLI flags > YAML > code defaults.
 
@@ -278,6 +353,30 @@ fully-resolved config to `Arioso/models/config_<run-name>.yaml` (uploaded to W&B
    constants + one `SIGNALS` registry entry + an inference-time branch in `infer.build_cond`.
    (A YAML `conditioning: [...]` then names it; a root lacking it is unknown-filled automatically.)
 
+## Tests (`Arioso/tests/` — 107 cases, no GPU / network / data root)
+
+`"$PY" -m pytest Arioso/tests -q`. Everything is pure CPU and builds whatever roots it needs under
+`tmp_path`, so the suite runs anywhere.
+
+- **test_keyshift.py** (39) — the four contracts `common.keyshift` promises: `cents == 0` is
+  **bit-identical** to `common.vocoder.mel_frames` (so the re-implemented STFT can never silently
+  drift from the vendored BigVGAN one); `T` is cents-invariant; the shift really is a pitch shift
+  (the keyshifted mel of a tone matches the mel of the *resynthesized* transposed tone, bin for
+  bin); and the known top-bin artifact for `cents < 0` is locked to bins 126/127 so it cannot widen
+  into the band the model learns. Tolerances are measured facts — a failure means the DSP changed.
+- **test_pitch_aug.py** (23) — `Arioso.pitch_aug` + the dataset wiring: **off is off** (`p == 0` and
+  `pitch_aug=None` give items byte-identical to the memmap path and draw no RNG at all, so a
+  baseline run cannot change); **train only** (`build_pitch_aug` is structurally inactive for any
+  other split); **graceful fallback** (a root without `prior_wav/`/`gt/` is never augmented even at
+  `p == 1.0`); **alignment** (an augmented item keeps its frame count and its cond/boundary tracks
+  bit-for-bit — only `x0`/`x1` move); and the `shifted_pair` slice geometry / RNG-stream contract.
+- **test_boundary_cond.py** (19) — offset frames, the `boundary_distances` core, the
+  `BoundarySinusoid` featurizer, `BoundaryCondSpec` config round-trip, YAML resolution.
+- **test_splits.py** (16) — `make_split`'s verbatim load + stale warning, and `update_split`'s
+  additive reconciliation (never moves a surviving assignment, prunes, assigns by whole piece).
+- **test_cond_build.py** (10) — `Arioso.infer.build_cond` over hand-built notes: key/dtype
+  contract, boundary semantics, train/inference equivalence, refactor guard.
+
 ## Dependencies & caveats
 
 - Env **ai-violin**: `torch` (2.6, CUDA), `numpy`, `scipy`, `librosa`, `soundfile`, `pretty_midi`,
@@ -290,8 +389,8 @@ fully-resolved config to `Arioso/models/config_<run-name>.yaml` (uploaded to W&B
   `common.vocoder.mel_spectrogram`/`mel_frames` — a re-implemented prior/mel would break
   train/inference identity or the vocoder.
 - A **dataset root** holds training data only (gitignored): per-root `prior_mel/`, `onsets/`,
-  `manifest.json`, `split.json`, optional `cond/`. Model **artifacts** live under the package and
-  are gitignored: checkpoints in `Arioso/models/checkpoint_<step>.pt`, listening wavs in
+  `manifest.json`, `split.json`, optional `cond/` and optional `prior_wav/`. Model **artifacts**
+  live under the package and are gitignored: checkpoints in `Arioso/models/checkpoint_<step>.pt`, listening wavs in
   `Arioso/samples/`.
 - **Per-frame conditioning is baseline-OFF** (`AriosoConfig.conditioning` defaults to `()` — the
   main synthetic corpus carries no labels). A labelled run opts in with `conditioning:
@@ -299,6 +398,11 @@ fully-resolved config to `Arioso/models/config_<run-name>.yaml` (uploaded to W&B
   the id tracks live under each root's `cond/<signal>/` (built by `Labeler.compile` for gt_arky,
   unknown-filled for a root that lacks a signal). The three encodings are documented in
   `common/README.md`.
+- **Pitch-shift augmentation is baseline-OFF** (`pitch_aug_p` defaults to 0.0) and needs
+  `prior_wav/` in the root — the recorded `Data/datasets/gt_arky` root has it, the synthetic `Data/`
+  root does **not**, and a root without it is silently never augmented rather than erroring. It
+  costs two STFTs per augmented sample (~19 ms per 10 s pair), so raise `run.num_workers` to hide
+  it behind the GPU step. Validated end-to-end in `test notebooks/pitch_shift_validation.ipynb`.
 - **Out of scope** (deferred, toggles default OFF): body EQ / tilt / rolloff, vibrato/LFO prior,
   F0/voicing conditioning, CFG **conditioning dropout** (`cond_dropout`, the framework is wired but
   defaults 0.0), energy-balanced loss, vocoder fine-tuning, polyphony.

@@ -4,9 +4,12 @@ Single source of truth for values that every package must agree on — most
 importantly the sample rate (training must read audio at the exact rate the
 dataset was written at), the mel contract, and the cross-producer loudness
 contract (``TARGET_RMS_DBFS`` / ``VOICED_TOP_DB``, shared by every GT
-normalization and the prior's masked-RMS level match). Truly pipeline-only
-constants (e.g. ``BOOKS``, book paths) stay in ``DataSynthesizer/config.py``;
-the prior-shape knobs live in ``common/prior.py``.
+normalization and the prior's masked-RMS level match). It also names the
+project-default model checkpoints — which BigVGAN generator (``VOCODER_DIR``)
+and which Arioso checkpoint (``ACOUSTIC_CKPT``) inference starts from — so the
+app and the CLIs agree on one default without hardcoding paths apiece. Truly
+pipeline-only constants (e.g. ``BOOKS``, book paths) stay in
+``DataSynthesizer/config.py``; the prior-shape knobs live in ``common/prior.py``.
 """
 
 from __future__ import annotations
@@ -50,3 +53,10 @@ FMAX     = None       # mel upper bound; None => SR / 2 (22050 Hz)
 # mysteriously worse.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VOCODER_DIR: str | None = os.path.join(_REPO_ROOT, "Vocoder", "models", "ft_v2")
+
+# --- Acoustic model checkpoint selection -----------------------------------
+# Default Arioso checkpoint for inference (Studio's initial selection and the
+# CLI fallback). Runs live under Arioso/models/<run>/; keep this pointing at a
+# checkpoint inside that tree so Studio's scan can resolve it.
+ACOUSTIC_CKPT: str = os.path.join(_REPO_ROOT, "Arioso", "models",
+                                  "7-9-adr", "checkpoint_final.pt")

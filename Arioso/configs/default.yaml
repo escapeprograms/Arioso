@@ -46,6 +46,8 @@ model:
   path_aug_std: 1.0           # off-path noise scale; effective displacement std is path_aug_std*t(1-t) (float)
   adr_beta: 0.0               # Anti-Drift Rectification loss weight in L = L_FM + adr_beta*L_ADR (0 = off); see Arioso.augment
   adr_p: 1.0                  # fraction of steps ADR is applied (per-step gate; paper-faithful default 1.0) (float)
+  pitch_aug_p: 0.0            # pitch-shift augmentation: fraction of TRAIN samples re-melled from wav at a random shift (0 = off); see Arioso.pitch_aug
+  pitch_aug_cents: 100.0      # half-width of the uniform cents draw (100 = +/- 1 semitone) (float)
 
   # --- Training ---
   lr: 2.0e-4                  # AdamW peak learning rate (float)
@@ -81,3 +83,4 @@ run:
   wandb: true               # log to W&B when WANDB_API_KEY is set
   name: null                # W&B run name; null -> auto_run_name(cfg)
   resume: false             # continue from the highest step checkpoint in this run's folder (requires an explicit name)
+  num_workers: 0            # dataloader workers for the TRAIN loader (hides pitch-aug CPU cost; the val loader is always 0)

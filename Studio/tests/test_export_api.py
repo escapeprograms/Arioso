@@ -157,11 +157,17 @@ def test_export_wav_stale_409(client):
     assert r.json()["error"] == "render_stale"
 
 
-def _plant_fresh_render(cfg, pid):
-    """Fake a fresh render: cache seg WAVs + mix.wav + a matching meta.json."""
+def _plant_fresh_render(cfg, pid, vocoder=None):
+    """Fake a fresh render: cache seg WAVs + mix.wav + a matching meta.json.
+
+    ``vocoder`` is the render's vocoder name; ``None`` plants a *legacy* meta with
+    no ``vocoder`` key at all (which must still read as fresh, since such renders
+    used the config default).
+    """
     doc = project_store.load(cfg, pid)
     plan = plan_render(doc, cfg, cfg.default_model, cfg.default_checkpoint,
-                       cfg.default_prior_mode, cache_dir=render_cache_dir(cfg, pid))
+                       cfg.default_prior_mode, vocoder=vocoder,
+                       cache_dir=render_cache_dir(cfg, pid))
     cdir = render_cache_dir(cfg, pid)
     import os
     os.makedirs(cdir, exist_ok=True)
@@ -178,6 +184,8 @@ def _plant_fresh_render(cfg, pid):
         "segments": [{"hash": s["hash"]} for s in plan["segments"]],
         "warnings": [],
     }
+    if vocoder is not None:
+        meta["vocoder"] = vocoder
     atomic_write_json(render_meta_file(cfg, pid), meta)
 
 
@@ -196,6 +204,33 @@ def test_export_wav_success_when_fresh(client):
     served = client.get(body["path"])
     assert served.status_code == 200
     assert served.content[:4] == b"RIFF"
+
+
+def test_export_wav_fresh_with_non_default_vocoder(client):
+    # A render made with a non-default vocoder must re-plan under *its* vocoder,
+    # or the export would spuriously 409 render_stale.
+    cfg = client.app.state.cfg
+    pid = _new_project(client, "WavVoc")
+    client.post(f"/api/projects/{pid}/import-midi", content=_midi_bytes((60, 62)),
+                headers={"content-type": "application/octet-stream"})
+    _plant_fresh_render(cfg, pid, vocoder="hf")
+    assert cfg.default_vocoder != "hf"            # genuinely a different identity
+    r = client.post(f"/api/projects/{pid}/export", json={"kind": "wav"})
+    assert r.status_code == 200, r.json()
+
+
+def test_export_wav_fresh_with_legacy_meta_without_vocoder(client):
+    # Metas written before per-render vocoder selection carry no "vocoder" key;
+    # they used the config default, so the fallback keeps them hashing identically.
+    cfg = client.app.state.cfg
+    pid = _new_project(client, "WavLegacy")
+    client.post(f"/api/projects/{pid}/import-midi", content=_midi_bytes((60,)),
+                headers={"content-type": "application/octet-stream"})
+    _plant_fresh_render(cfg, pid)                 # no "vocoder" key planted
+    from Studio.library import read_json
+    assert "vocoder" not in read_json(render_meta_file(cfg, pid))
+    r = client.post(f"/api/projects/{pid}/export", json={"kind": "wav"})
+    assert r.status_code == 200, r.json()
 
 
 def test_export_wav_stale_after_edit(client):

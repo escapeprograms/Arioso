@@ -228,7 +228,8 @@ def train(cfg: AriosoConfig, run_s: RunSettings) -> None:
     if run:
         run.save(resolved_path, policy="now")
 
-    train_loader = build_dataloader(data_roots, "train", batch_size, cfg, shuffle=True)
+    train_loader = build_dataloader(data_roots, "train", batch_size, cfg, shuffle=True,
+                                    num_workers=run_s.num_workers)
     val_loader = build_dataloader(data_roots, "val", batch_size, cfg, shuffle=False)
     print(f"train clips: {len(train_loader.dataset)}  val clips: {len(val_loader.dataset)}  "
           f"batches/epoch: {len(train_loader)}")
@@ -250,6 +251,9 @@ def train(cfg: AriosoConfig, run_s: RunSettings) -> None:
         sampler = train_loader.batch_sampler
         if hasattr(sampler, "set_epoch"):
             sampler.set_epoch(step)                              # reshuffle buckets
+        # Fresh pitch-shift draws for this pass over the pool; the step at epoch start is a unique
+        # per-epoch token (no-op when the augmentation is off). See Arioso.pitch_aug.
+        train_loader.dataset.set_epoch(step)
         for batch in train_loader:
             if step >= total_steps:
                 break
@@ -400,9 +404,12 @@ def main() -> None:
         run_s = dataclasses.replace(
             run_s, device="cuda" if torch.cuda.is_available() else "cpu")
     if args.smoke:
+        # Smoke runs get their own "<name>-smoke" folder: a smoke sharing the real run's folder
+        # would overwrite its checkpoint_final.pt and resolved config.yaml (this happened once).
         run_s = dataclasses.replace(
             run_s, steps=run_s.steps or 300, batch_size=min(run_s.batch_size, 4),
-            log_every=25, ckpt_every=0, val_every=150)
+            log_every=25, ckpt_every=0, val_every=150,
+            name=(run_s.name + "-smoke") if run_s.name else "smoke")
     train(cfg, run_s)
 
 

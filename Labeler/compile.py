@@ -15,6 +15,9 @@ Per verified clip ``<id>`` we write, under :attr:`CompileParams.root`:
 * ``target_mel/<id>.npy`` — ``[128, T]`` mel of that GT (:func:`common.vocoder.mel_frames`).
 * ``prior_mel/<id>.npy`` — ``[128, T]`` mel of the informed sawtooth prior rendered
   from the surviving notes (real velocities) at the GT's exact length.
+* ``prior_wav/<id>.wav`` — that same rendered prior as audio (mono PCM16 @ 44.1 kHz,
+  exactly as long as ``gt/``), kept so a consumer can pitch-shift the prior waveform
+  rather than re-deriving it from the mel.
 * ``onsets/<id>.npy`` — ``[K]`` int32 onset frames.
 * ``offsets/<id>.npy`` — ``[K]`` int32 note-offset frames (Arioso's sinusoidal
   boundary-distance conditioning reads these alongside ``onsets/``).
@@ -54,7 +57,7 @@ import numpy as np
 from common.audio_io import load_mono, voiced_rms_normalize, write_pcm16
 from common.config import HOP_SIZE, N_MELS, SR
 from common.dataset_schema import (ARTICULATIONS, DIR_GT, DIR_OFFSETS, DIR_ONSETS,
-                                   DIR_PRIOR_MEL, DIR_TARGET_MEL, DatasetRoot,
+                                   DIR_PRIOR_MEL, DIR_PRIOR_WAV, DIR_TARGET_MEL, DatasetRoot,
                                    MANIFEST_JSON, MANIFEST_SCHEMA_VERSION,
                                    NoteEvent, cond_dir, load_manifest,
                                    offset_frames, onset_frames, rasterize_articulation,
@@ -151,9 +154,16 @@ def notes_hash(notes: list[dict], mute_regions: list[dict]) -> str:
 # --- artifact paths -------------------------------------------------------------
 
 def _artifact_paths(root: str, base: str) -> dict[str, str]:
-    """Every on-disk artifact path for clip ``base`` under ``root``."""
+    """Every on-disk artifact path for clip ``base`` under ``root``.
+
+    ``prior_wav`` is the newest entry, and every clip compiled before it existed fails
+    :func:`_artifacts_exist` because of it — that is deliberate: the provenance triple is
+    unchanged (nothing about *what* we render moved), so the next run silently rebuilds the
+    whole corpus once and is incremental again forever after.
+    """
     return {
         "gt": os.path.join(root, DIR_GT, base + ".wav"),
+        "prior_wav": os.path.join(root, DIR_PRIOR_WAV, base + ".wav"),
         "target_mel": os.path.join(root, DIR_TARGET_MEL, base + ".npy"),
         "prior_mel": os.path.join(root, DIR_PRIOR_MEL, base + ".npy"),
         "onsets": os.path.join(root, DIR_ONSETS, base + ".npy"),
@@ -291,6 +301,12 @@ def compile_one(cfg: LabelerConfig, clip_id: str, manifest: dict,
         raise AssertionError(
             f"{clip_id}: prior_mel T={prior_mel.shape[1]} != target_mel T={n_frames}")
 
+    # PCM16 clamps silently past ±1.0, which would leave prior_wav a *different* signal
+    # from the float the prior_mel above was computed from. Fail loudly instead.
+    peak = float(np.max(np.abs(prior_wav)))
+    if peak > 1.0:
+        raise AssertionError(f"{clip_id}: prior peak {peak:.3f} > 1.0 would clip on PCM16 write")
+
     # -- onsets + offsets + two conditioning tracks (notes already in cleaned-audio time) --
     onsets = onset_frames(events, n_frames)
     offs = offset_frames(events, n_frames)
@@ -302,6 +318,7 @@ def compile_one(cfg: LabelerConfig, clip_id: str, manifest: dict,
     for p in paths.values():
         os.makedirs(os.path.dirname(p), exist_ok=True)
     write_pcm16(paths["gt"], y, SR)
+    write_pcm16(paths["prior_wav"], prior_wav, SR)
     np.save(paths["target_mel"], target_mel.astype(np.float32))
     np.save(paths["prior_mel"], prior_mel.astype(np.float32))
     np.save(paths["onsets"], onsets.astype(np.int32))

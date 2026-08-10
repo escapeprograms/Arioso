@@ -1,9 +1,10 @@
 # common — memory palace
 
-Project-wide shared code: the constants, audio I/O, mel/vocoder front-end, prior
-synthesis, onset alignment, **and the on-disk dataset-root standard** that every
-top-level package agrees on. It is a peer of `DataSynthesizer/`, `Labeler/`,
-`Arioso/`, and `Studio/` — owned by none of them. The two data **producers**
+Project-wide shared code: the constants, audio I/O, mel/vocoder front-end (plus the
+pitch-shifted `keyshift` variant), prior synthesis, onset alignment, **and the
+on-disk dataset-root standard** that every top-level package agrees on. It is a
+peer of `DataSynthesizer/`, `Labeler/`, `Arioso/`, and `Studio/` — owned by none of
+them. The two data **producers**
 (DataSynthesizer, Labeler) never import each other; they agree only through this
 package (chiefly `dataset_schema.py`), and Arioso **consumes** what they emit.
 
@@ -52,6 +53,7 @@ its prose spec.
   gt/<base>.wav                  # mono PCM16 @ 44100, voiced-RMS at TARGET_RMS_DBFS (-20 dBFS)
   target_mel/<base>.npy          # [128, T] float32 (common.vocoder mel)
   prior_mel/<base>.npy           # [128, T] float32, same T
+  prior_wav/<base>.wav           # the rendered prior as audio, mono PCM16 @ 44100, len == gt/
   onsets/<base>.npy              # [K] int32 onset frame indices, sorted unique
   cond/articulation/<base>.npy   # [T] uint8 — only if listed in manifest "signals"
   cond/velocity/<base>.npy       # [T] uint8 — optional likewise
@@ -59,9 +61,20 @@ its prose spec.
 ```
 
 Directory/file names are constants in the schema (`DIR_GT`, `DIR_TARGET_MEL`,
-`DIR_PRIOR_MEL`, `DIR_ONSETS`, `cond_dir(signal)`, `MANIFEST_JSON`, `SPLIT_JSON`) —
-never hardcode the strings. `split.json` is produced by `Arioso.splits`, not the
-data producers, and is per-root (grouped by manifest `piece`).
+`DIR_PRIOR_MEL`, `DIR_PRIOR_WAV`, `DIR_ONSETS`, `cond_dir(signal)`, `MANIFEST_JSON`,
+`SPLIT_JSON`) — never hardcode the strings. `split.json` is produced by
+`Arioso.splits`, not the data producers, and is per-root (grouped by manifest `piece`).
+
+**`prior_wav/` is optional and additive.** Both producers write it (Labeler
+`compile`, DataSynthesizer `build_prior`) as the float prior *before* melling, so
+it is the same signal `prior_mel/` was computed from, sample-for-sample aligned
+with `gt/`. It exists so a consumer can **re-mel the pair from audio** — today
+that is Arioso's pitch-shift augmentation (`Arioso.pitch_aug` +
+`common.keyshift`), which needs waveforms, not mels. A root written before it
+existed simply lacks the directory; consumers must check `os.path.isfile` and fall
+back rather than fail (`Arioso.pitch_aug.wavs_available` is that gate), so no root
+needs regeneration to stay trainable. It is deliberately **not** required by the
+"a listed clip is complete" rule below.
 
 ### `manifest.json` shape
 
@@ -152,6 +165,19 @@ in `common/config.py` so the two normalizations can never disagree.
   `HOP_SIZE as HOP`; `Arioso.config` derives `FRAME_RATE = SR/HOP_SIZE`. Truly
   pipeline-only constants (`BOOKS`, book/dataset paths) stay in
   `DataSynthesizer/config.py`.
+- **Project-default model checkpoints** — the two paths inference starts from, both
+  anchored to the repo root so they resolve from any cwd:
+  - `VOCODER_DIR = <repo>/Vocoder/models/ft_v2` — the active BigVGAN generator dir
+    (`config.json` + `bigvgan_generator.pt`); the violin fine-tune. Set to `None` for
+    the stock HF checkpoint. Overridable per call via `load_vocoder(checkpoint_dir=…)`.
+  - `ACOUSTIC_CKPT = <repo>/Arioso/models/7-9-adr/checkpoint_final.pt` — the default
+    Arioso checkpoint: `Arioso.infer`'s `--ckpt` default and Studio's initial
+    selection. Keep it pointing inside `Arioso/models/<run>/` so Studio's model scan
+    can resolve it (`Studio.config` splits it into `default_model` /
+    `default_checkpoint` by basename, and derives `default_vocoder` from
+    `VOCODER_DIR`'s basename — `"hf"` when it is `None`).
+  Both live here so promoting a checkpoint is a one-line change that the app and every
+  CLI pick up together.
 
 ### audio_io.py — shared audio I/O
 - `load_mono(path, sr=SR)` — `librosa.load` to a mono array at `sr`.
@@ -166,9 +192,10 @@ in `common/config.py` so the two normalizations can never disagree.
 The prose above **is** this module's contract; it is deliberately **torch-free**
 (numpy + stdlib, `pretty_midi` only inside the one MIDI helper) so any producer
 imports it without a GPU stack.
-- **Layout constants** — `DIR_GT`/`DIR_TARGET_MEL`/`DIR_PRIOR_MEL`/`DIR_ONSETS`,
-  `COND_ROOT`, `cond_dir(signal)`, `MANIFEST_JSON`, `SPLIT_JSON`,
-  `MANIFEST_SCHEMA_VERSION = 1`.
+- **Layout constants** — `DIR_GT`/`DIR_TARGET_MEL`/`DIR_PRIOR_MEL`/`DIR_PRIOR_WAV`/
+  `DIR_ONSETS`, `COND_ROOT`, `cond_dir(signal)`, `MANIFEST_JSON`, `SPLIT_JSON`,
+  `MANIFEST_SCHEMA_VERSION = 1`. `DIR_PRIOR_WAV = "prior_wav"` is the optional
+  rendered-prior audio described above.
 - **Vocab / encoding constants** — `ARTICULATIONS`, `ARTIC_REST_ID`/`ARTIC_NUM_CLASSES`,
   the velocity/vibrato ids, and the derived `SIGNAL_NUM_CLASSES` / `SIGNAL_REST_ID`
   maps (Arioso's `CondSpec` registry reads these — the literals live once, here).
@@ -197,8 +224,10 @@ imports it without a GPU stack.
   (atomic `.tmp` + `os.replace`, both validate schema_version + frame block).
 - `DatasetRoot(path)` — read-only accessor Arioso and eval consume a root through:
   `.name`, `.signals` (frozenset), `.clips`, `.basenames()`, `.n_frames(base)`,
-  `.piece(base)`, `.gt_path/target_mel_path/prior_mel_path/onsets_path(base)`, and
-  `.cond_path(signal, base)` (→ `None` when the root lacks that signal).
+  `.piece(base)`, `.gt_path/target_mel_path/prior_mel_path/onsets_path/offsets_path(base)`,
+  `.prior_wav_path(base)` (the **optional** rendered-prior audio — the path is always
+  returned, so the caller `isfile`-checks it), and `.cond_path(signal, base)`
+  (→ `None` when the root lacks that signal).
 
 ### prior.py — MIDI → sawtooth informed-prior via a composable `PriorSynth`
 The prior synthesis (moved here from DataSynthesizer, so Arioso inference, the
@@ -324,10 +353,16 @@ DataSynthesizer).
 - Thin wrapper over NVIDIA's BigVGAN-v2, vendored at `external/BigVGAN` (no PyPI
   package; weights pull from the HF Hub on first load). Checkpoint:
   `nvidia/bigvgan_v2_44khz_128band_512x`.
-- `load_vocoder(device="cpu", use_cuda_kernel=False)` — load + assert the
-  checkpoint's mel params equal the `config.py` contract (fails loudly on drift).
-  `use_cuda_kernel=True` selects the fused kernel; if it can't be built the loader
-  warns and falls back to the PyTorch-native path — **still on the GPU**, slower.
+- `load_vocoder(device="cpu", use_cuda_kernel=False, checkpoint_dir=None)` — load +
+  assert the checkpoint's mel params equal the `config.py` contract (fails loudly on
+  drift). `use_cuda_kernel=True` selects the fused kernel; if it can't be built the
+  loader warns and falls back to the PyTorch-native path — **still on the GPU**, slower.
+  Checkpoint resolution order: the `checkpoint_dir` argument > `config.VOCODER_DIR`
+  (the project default — the violin fine-tune) > the HF Hub baseline;
+  `checkpoint_dir="hf"` forces the stock baseline regardless of the config (what the
+  A/B tooling and Studio's `stock (HF)` option use). A local dir must hold
+  `config.json` (or `ft_config.json`) plus `bigvgan_generator.pt` or the newest
+  step-prefixed `g_????????` snapshot.
 - `mel_spectrogram(wav)` — mel via BigVGAN's own `meldataset.mel_spectrogram`, fed
   the `config.py` params, so it can never drift from the checkpoint. **Use this for
   any mel computation — do not re-implement an STFT.**
@@ -364,9 +399,59 @@ the speedup (one-time, computer-level setup — several GB):
 No BigVGAN source changes are needed: its hardcoded `sm_70`/`sm_80` arch flags are
 forward-compatible with newer GPUs (e.g. sm_89 Ada).
 
+### keyshift.py — pitch-shifted mel extraction (DiffSinger nvSTFT "keyshift")
+A mel of a waveform **as if it had been transposed**, without resampling it. The
+shift happens *inside the STFT*: run it with a window/FFT of
+`WIN_SIZE * 2**(cents/1200)` while holding `HOP_SIZE` fixed, then read the first
+`N_FFT//2+1` bins through the ordinary 2048-point mel basis. Bin `i` of a
+`win_new`-point FFT sits at `i*SR/win_new` Hz but the basis reads it as
+`i*SR/N_FFT` Hz, so every partial lands a factor `win_new/N_FFT` higher — a pitch
+shift for the cost of one STFT, with the frame grid untouched. Pure DSP + integer
+math, numpy in / numpy out, CPU-only and torch-free at the API surface, so it is
+safe to call from dataloader workers. Sole consumer today: `Arioso.pitch_aug`.
+- `mel_frames_keyshift(wav, cents)` → `[N_MELS, T]` float32; positive `cents`
+  shifts up.
+  - **Bit-identity contract**: at `cents == 0.0` this is `np.array_equal` to
+    `common.vocoder.mel_frames` — *identical*, not close (`win_new` collapses to
+    2048, the pad to the vendored 768/768, the bin crop/pad to a no-op, the level
+    rescale to `* 1.0`). This is what lets augmented and memmapped training items
+    share one feature manifold; pinned by `Arioso/tests/test_keyshift.py` and
+    re-checked on real audio by `test notebooks/pitch_shift_validation.ipynb`.
+  - **Duration-preserving**: `T = 1 + (len(wav) - HOP_SIZE) // HOP_SIZE` for
+    *every* `cents`, because the pre-STFT reflect pad is sized from the scaled
+    window (`win_new - HOP_SIZE`) rather than held at 768/768, so `win_new` cancels
+    out of the `center=False` frame count. That is what keeps a shifted mel
+    frame-aligned with score-rasterized conditioning tracks.
+- `keyshift_factor(cents)` / `scaled_win(cents)` — the frequency multiplier and the
+  window+FFT length that realize it (2048 → 1933 at −100 cents, 2170 at +100).
+- `margin_frames(max_cents)` / `slice_read_range(start, end, margin)` — slice-read
+  geometry for windowed reads of long files: how many context frames a shifted
+  slice needs on each side (3 at ±100 cents) and the exact sample range to read for
+  frames `[start, end)`, returned as `(read_start_sample, read_n_samples,
+  head_frames)`. Both file edges are **exact**, not approximate — at frame 0 the
+  slice's own reflect pad *is* the whole-file one, likewise at EOF.
+- **Trap — never route this through the vendored BigVGAN mel.**
+  `external/BigVGAN/meldataset.mel_spectrogram` caches the mel basis *and* the Hann
+  window under one key built from `n_fft`, so calling it with a scaled `n_fft`
+  would also build a mel **basis** for that scaled `n_fft` — exactly the wrong
+  thing, since the whole mechanism depends on the basis staying at `N_FFT=2048`
+  while only the window scales. That vendored file must never be modified either;
+  this module re-implements its (small, fixed) math, and the `cents == 0`
+  bit-identity assertion is what stops the copy from drifting.
+- **Known artifact, `cents < 0` only** (`win_new < 2048`): the shifted STFT yields
+  fewer than `N_FFT//2+1` bins and the absent top rows are zero-filled, so mel bin
+  127 (~22 kHz) loses all support and sits on the `log(1e-5)` floor while bin 126 is
+  partially attenuated. Measured at −100 cents on real audio: bin 127 pinned on
+  100 % of frames, bin 126 on 72 %, bins ≤ 125 unaffected. Harmless for a 44.1 kHz
+  violin corpus — but **re-measure before widening the shift range**, since
+  `win_new` keeps shrinking and the floored band walks downward.
+- **Cost**: ~6-7 ms per 10 s of audio per track on CPU (≈13 ms for a prior+target
+  pair, ~19 ms end-to-end through `Arioso.pitch_aug.shifted_pair` including the two
+  ranged wav reads) — hidden behind the GPU step by `run.num_workers`.
+
 ## Consumers
 
-- `DataSynthesizer/` — `build_prior` (prior/onsets via `common.prior` /
+- `DataSynthesizer/` — `build_prior` (prior mel/wav/onsets via `common.prior` /
   `common.onset_align` / `common.vocoder`), `export_manifest` / `migrate_root`
   (standard-root manifest via `dataset_schema`), `build_dataset` / `download_audio`
   (audio I/O + loudness contract).
@@ -374,6 +459,7 @@ forward-compatible with newer GPUs (e.g. sm_89 Ada).
   `common.prior` + `common.vocoder`), `align` (`common.onset_align` / `common.prior`),
   `media` (`common.vocoder.mel_spectrogram`).
 - `Arioso/` — `config`/`clips`/`splits`/`dataset` (multi-root consume via
-  `DatasetRoot` + the schema constants), `infer` (prior + mel + conditioning).
+  `DatasetRoot` + the schema constants), `pitch_aug` (the **only** consumer of
+  `keyshift` + `DIR_PRIOR_WAV`), `infer` (prior + mel + conditioning).
 - `Studio/` — `render`/`bend` (prior + mel + `PB_RANGE_SEMITONES` from
   `common.prior` / `common.vocoder`).

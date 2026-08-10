@@ -19,7 +19,17 @@ from dataclasses import dataclass, field, fields
 
 import yaml
 
+from common.config import ACOUSTIC_CKPT, VOCODER_DIR
 from common.config import HOP_SIZE as HOP, SR  # canonical audio/mel contract
+
+# Studio's model/vocoder defaults are *derived* from the project-wide checkpoint
+# selections in common.config, so there is one place to promote a new checkpoint.
+# Studio names a run/checkpoint/vocoder by its basename (what /api/models lists),
+# hence the split of the absolute paths; a ``VOCODER_DIR`` of None (stock HF
+# baseline) maps onto the "hf" sentinel the vocoder scan appends.
+_DEF_MODEL = os.path.basename(os.path.dirname(ACOUSTIC_CKPT))          # "7-9-adr"
+_DEF_CHECKPOINT = os.path.basename(ACOUSTIC_CKPT)                      # "checkpoint_final.pt"
+_DEF_VOCODER = "hf" if not VOCODER_DIR else os.path.basename(os.path.normpath(VOCODER_DIR))  # "ft_v2"
 
 # project.json schema version (bumped when the on-disk project shape changes).
 # v2: one-time cache invalidation for the env-shaped prior (velocity->env_dct baked in).
@@ -110,8 +120,10 @@ class StudioConfig:
     projects_root: str = "Data/studio_projects"
     port: int = 8766
     models_root: str = "Arioso/models"
-    default_model: str = "7-9-adr"
-    default_checkpoint: str = "checkpoint_final.pt"
+    default_model: str = _DEF_MODEL
+    default_checkpoint: str = _DEF_CHECKPOINT
+    vocoders_root: str = "Vocoder/models"
+    default_vocoder: str = _DEF_VOCODER
     default_prior_mode: str = "bend"
     articulations: tuple[Articulation, ...] = _DEFAULT_ARTICULATIONS
     cache: CacheParams = field(default_factory=CacheParams)
@@ -235,7 +247,8 @@ def load_config(yaml_path: str | None = None) -> StudioConfig:
 
     base = StudioConfig()
     top_scalars = {"projects_root", "port", "models_root", "default_model",
-                   "default_checkpoint", "default_prior_mode"}
+                   "default_checkpoint", "vocoders_root", "default_vocoder",
+                   "default_prior_mode"}
     valid_top = top_scalars | {"cache", "retention", "articulations"}
     unknown = set(doc) - valid_top
     if unknown:

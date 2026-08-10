@@ -8,9 +8,13 @@ projects_root: Data/studio_projects   # root that /media mounts over; per-projec
 port: 8766                            # server bind port (127.0.0.1); distinct from Labeler's 8765
 models_root: Arioso/models            # scanned by /api/models for <run>/*.pt checkpoints
 
-# Render defaults surfaced to the dev-options drawer.
-default_model: 7-9-adr                # run flagged default in /api/models
-default_checkpoint: checkpoint_final.pt
+# Render defaults surfaced to the dev-options drawer. The model / vocoder
+# defaults come from common/config.py (ACOUSTIC_CKPT, VOCODER_DIR) so promoting a
+# checkpoint is a one-line change there; uncomment to pin Studio to another one.
+# default_model: 7-9-adr              # run flagged default in /api/models
+# default_checkpoint: checkpoint_final.pt
+# vocoders_root: Vocoder/models       # scanned by /api/models for <name>/bigvgan_generator.pt
+# default_vocoder: ft_v2              # a dir under vocoders_root, or "hf" for the stock BigVGAN
 default_prior_mode: bend              # bend | quantized (quantized ignores per-note bends/vibrato)
 
 # Playing-technique vocabulary. name -> class; key auto-binds the 1..9 hotkey;

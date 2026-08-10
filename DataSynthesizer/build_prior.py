@@ -6,12 +6,15 @@ re-downloading anything:
 
 * ``<out>/prior_mel/<base>.npy`` — ``[N_MELS, T]`` float32 prior mel from the spec-faithful
   prior (shaped additive saw + masked-RMS level match), frame-aligned to ``target_mel`` (same ``T``).
+* ``<out>/prior_wav/<base>.wav`` — that same GT-aligned prior as audio (mono PCM16 @ SR,
+  ``n_samples`` long), for consumers that want to pitch-shift the waveform. An existing root
+  without it needs no regeneration: a root lacking ``prior_wav`` is simply never augmented.
 * ``<out>/onsets/<base>.npy`` — ``[K]`` int32 aligned onset frame indices, used by the clip
   enumerator.
 
 The dir names come from the standard layout (``common.dataset_schema.DIR_PRIOR_MEL`` /
-``DIR_ONSETS``). The prior is assembled by :func:`common.prior.quantized_prior` from the
-``PRIOR_*`` knobs (source / harmonic-law / tilt overridable per-run via the CLI flags below
+``DIR_PRIOR_WAV`` / ``DIR_ONSETS``). The prior is assembled by
+:func:`common.prior.quantized_prior` from the ``PRIOR_*`` knobs (source / harmonic-law / tilt overridable per-run via the CLI flags below
 for ablations). It reuses the
 manifest's per-clip ``offset_ms`` (estimated once at build time from the onset cross-correlation) so
 the prior lines up with the target exactly as the GT-length quantized prior did — no re-estimation.
@@ -32,8 +35,9 @@ import traceback
 
 import numpy as np
 
+from common.audio_io import write_pcm16
 from common.config import TARGET_RMS_DBFS
-from common.dataset_schema import DIR_ONSETS, DIR_PRIOR_MEL
+from common.dataset_schema import DIR_ONSETS, DIR_PRIOR_MEL, DIR_PRIOR_WAV
 from common.onset_align import shift_samples
 from common.prior import (PRIOR_ALPHA, PRIOR_CORNER_NC, PRIOR_CORNER_P, PRIOR_ENVELOPE,
                           PRIOR_HARMONIC_LAW, PRIOR_LEVEL_MATCH, PRIOR_SOURCE,
@@ -54,16 +58,20 @@ def process_clip(row: dict, out_dir: str, dataset_root: str, *,
                  level_match: str = PRIOR_LEVEL_MATCH,
                  target_rms_dbfs: float = TARGET_RMS_DBFS,
                  overwrite: bool = False) -> str:
-    """Build prior mel + onset frames for one manifest row. Returns a status string."""
+    """Build prior mel + prior wav + onset frames for one manifest row. Returns a status string."""
     base = row["basename"]
     prior_dir = os.path.join(out_dir, DIR_PRIOR_MEL)
+    prior_wav_dir = os.path.join(out_dir, DIR_PRIOR_WAV)
     onset_dir = os.path.join(out_dir, DIR_ONSETS)
     os.makedirs(prior_dir, exist_ok=True)
+    os.makedirs(prior_wav_dir, exist_ok=True)
     os.makedirs(onset_dir, exist_ok=True)
     prior_mel_path = os.path.join(prior_dir, base + ".npy")
+    prior_wav_path = os.path.join(prior_wav_dir, base + ".wav")
     onset_path = os.path.join(onset_dir, base + ".npy")
 
-    if not overwrite and os.path.isfile(prior_mel_path) and os.path.isfile(onset_path):
+    if (not overwrite and os.path.isfile(prior_mel_path) and os.path.isfile(prior_wav_path)
+            and os.path.isfile(onset_path)):
         return "exists"
 
     midi = _midi_path(dataset_root, row["book"], base)
@@ -77,6 +85,15 @@ def process_clip(row: dict, out_dir: str, dataset_root: str, *,
                             level_match=level_match, target_rms_dbfs=target_rms_dbfs)
     prior = synth.render(midi, total_samples=n_samples)
     prior = shift_samples(prior, applied)
+
+    # Persist the POST-shift buffer only: the pre-shift render is in score time, so writing it
+    # here would hand consumers a prior_wav silently misaligned with gt/ and prior_mel.
+    # PCM16 clamps silently past ±1.0, which would make the wav a different signal from the
+    # float the mel below is computed from — fail loudly instead.
+    peak = float(np.max(np.abs(prior)))
+    if peak > 1.0:
+        raise AssertionError(f"{base}: prior peak {peak:.3f} > 1.0 would clip on PCM16 write")
+    write_pcm16(prior_wav_path, prior, SR)
 
     prior_mel = mel_frames(prior)
     np.save(prior_mel_path, prior_mel)

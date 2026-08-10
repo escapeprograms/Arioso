@@ -40,6 +40,9 @@ def main() -> None:
     ap.add_argument("--input", help="GT wav (default: first held-out clip)")
     ap.add_argument("--out", default=os.path.join(SAMPLES_DIR, "copysynth.wav"))
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--vocoder", default=None, metavar="DIR|hf",
+                    help="BigVGAN checkpoint dir, or 'hf' for the stock HF baseline "
+                         "(default: the project default, common.config.VOCODER_DIR)")
     args = ap.parse_args()
 
     cfg = AriosoConfig()
@@ -48,7 +51,7 @@ def main() -> None:
 
     y = load_mono(gt_path)
     mel = mel_spectrogram(y)                                  # [1, 128, T], Section-3 front-end
-    voc = load_vocoder(device=args.device)                   # asserts mel contract vs checkpoint
+    voc = load_vocoder(device=args.device, checkpoint_dir=args.vocoder)  # asserts mel contract
     audio = vocode(voc, mel.to(args.device))
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     write_pcm16(args.out, audio)

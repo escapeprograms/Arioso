@@ -1,0 +1,42 @@
+# gt_arky-only conditioned run + pitch-shift augmentation — four per-frame signals, human GT alone.
+#
+# Trains over the single Labeler root (Data/datasets/gt_arky). Conditioning mixes the two
+# categorical signals (articulation / vibrato, resolved from the SIGNALS registry) with the two
+# sinusoidal boundary signals (time since note onset / time until note offset, resolved from
+# BOUNDARY_SIGNALS) — a compact 50 ms attack/decay-shaped cue around each note boundary. Per-note
+# dynamics are NOT a conditioning signal: they are baked into prior_mel via env_dct, so there is no
+# velocity cond track. The gt_arky root carries every remaining track on disk (cond/ + onsets/ +
+# offsets/), so nothing falls back to the unknown/zero fill; the boundary signals require offsets/,
+# so recompile the root first:
+#   python -m Labeler.compile --all --force
+#
+# The new knob here is pitch-shift augmentation (Arioso.pitch_aug): half the train samples are
+# re-melled from prior_wav/ + gt/ at a fresh random shift each epoch, ~25 min of audio being far too
+# little on its own. It is duration-preserving, so the cond tracks and clip framing are untouched;
+# it does need prior_wav/ in the root (a root without it is silently never augmented) and it costs
+# two STFTs per augmented sample, hidden behind run.num_workers.
+#
+# Usage:  python -m Arioso.train --config Arioso/configs/8-8-pitch-aug.yaml
+
+config_version: 1
+
+model:
+  # Two categorical + two boundary signals. Boundary signals default window_ms=50.0 (the legacy
+  # DataSynthesizer ONSET_DECAY_MS); override inline, e.g. {name: time_until_offset, window_ms: 75.0}.
+  conditioning:
+    - articulation
+    - vibrato
+    - time_since_onset            # window_ms defaults to 50.0 (legacy ONSET_DECAY_MS)
+    - time_until_offset           # override style: {name: time_until_offset, window_ms: 75.0}
+  pitch_aug_p: 0.5          # half the train samples get a fresh shift each epoch
+  pitch_aug_cents: 100.0    # +/- 1 semitone (the code default, spelled out for readability)
+  lr: 2.0e-4                # peak LR after warmup
+  lr_schedule: cosine       # post-warmup anneal shape
+  lr_min: 2.0e-5            # LR floor at total_steps (10% of peak)
+  warmup_steps: 2000        # linear ramp 0 -> lr before annealing starts
+  total_steps: 20000        # ~25 min of audio only — overfit risk; watch val curves
+
+run:
+  data_roots: [Data/datasets/gt_arky]         # human ground truth alone (no synthetic bulk)
+  num_workers: 4            # hide the pitch-aug STFT cost behind the GPU step (val loader stays 0)
+  name: 8-8-pitch-aug

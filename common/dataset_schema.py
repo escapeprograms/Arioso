@@ -5,7 +5,8 @@ from score MIDIs) and the **Labeler** (genuine human ground truth). They must ne
 import each other, yet they must agree, byte-for-byte, on *where* artifacts live and
 *how* the categorical conditioning tracks are encoded. This module is that contract:
 
-* **Layout constants** (``DIR_*``, :func:`cond_dir`, ``MANIFEST_JSON``, ``SPLIT_JSON``,
+* **Layout constants** (``DIR_*`` — including ``DIR_PRIOR_WAV``, the rendered prior
+  waveform kept alongside its mel — :func:`cond_dir`, ``MANIFEST_JSON``, ``SPLIT_JSON``,
   ``MANIFEST_SCHEMA_VERSION``) — the on-disk directory/file names of a standard root.
 * **Vocab / encoding constants** (``ARTICULATIONS``, ``SIGNAL_NUM_CLASSES``,
   ``SIGNAL_REST_ID`` …) — the id alphabets Arioso's conditioning embeddings expect.
@@ -51,6 +52,7 @@ from common.config import HOP_SIZE, N_MELS, SR
 MANIFEST_JSON = "manifest.json"      # canonical per-root manifest (schema_version 1)
 SPLIT_JSON = "split.json"            # train/val split (written by Arioso.splits, not producers)
 DIR_GT = "gt"                        # <base>.wav mono PCM16 @ SR, voiced-RMS at TARGET_RMS_DBFS
+DIR_PRIOR_WAV = "prior_wav"          # <base>.wav mono PCM16 @ SR, same length as gt/ (pitch-shift augmentation source)
 DIR_TARGET_MEL = "target_mel"        # <base>.npy [N_MELS, T] float32 (common.vocoder mel)
 DIR_PRIOR_MEL = "prior_mel"          # <base>.npy [N_MELS, T] float32, same T
 DIR_ONSETS = "onsets"                # <base>.npy [K] int32 onset frame indices, sorted unique
@@ -430,6 +432,10 @@ class DatasetRoot:
 
     def gt_path(self, base: str) -> str:
         return os.path.join(self.path, DIR_GT, base + ".wav")
+
+    def prior_wav_path(self, base: str) -> str:
+        """Rendered prior waveform — optional: roots predating it lack the file (check ``isfile``)."""
+        return os.path.join(self.path, DIR_PRIOR_WAV, base + ".wav")
 
     def target_mel_path(self, base: str) -> str:
         return os.path.join(self.path, DIR_TARGET_MEL, base + ".npy")
